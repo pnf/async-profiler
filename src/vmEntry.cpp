@@ -37,6 +37,7 @@ static Arguments _agent_args;
 JavaVM* VM::_vm;
 jvmtiEnv* VM::_jvmti = NULL;
 int VM::_hotspot_version = 0;
+bool VM::_zero_vm = false;
 void* VM::_libjvm;
 void* VM::_libjava;
 AsyncGetCallTrace VM::_asyncGetCallTrace;
@@ -51,6 +52,11 @@ static void wakeupHandler(int signo) {
     // Dummy handler for interrupting syscalls
 }
 
+static bool isZeroInterpreterMethod(const char* blob_name) {
+    return strncmp(blob_name, "_ZN15ZeroInterpreter", 20) == 0
+        || strncmp(blob_name, "_ZN19BytecodeInterpreter3run", 28) == 0;
+}
+
 
 bool VM::init(JavaVM* vm, bool attach) {
     if (_jvmti != NULL) return true;
@@ -60,11 +66,22 @@ bool VM::init(JavaVM* vm, bool attach) {
         return false;
     }
 
+#ifdef __APPLE__
+    Dl_info dl_info;
+    if (dladdr((const void*)wakeupHandler, &dl_info) && dl_info.dli_fname != NULL) {
+        // Make sure async-profiler DSO cannot be unloaded, since it contains JVM callbacks.
+        // On Linux, we use 'nodelete' linker option.
+        dlopen(dl_info.dli_fname, RTLD_LAZY | RTLD_NODELETE);
+    }
+#endif
+
     char* prop;
     if (_jvmti->GetSystemProperty("java.vm.name", &prop) == 0) {
         bool is_hotspot = strstr(prop, "OpenJDK") != NULL ||
                           strstr(prop, "HotSpot") != NULL ||
-                          strstr(prop, "GraalVM") != NULL;
+                          strstr(prop, "GraalVM") != NULL ||
+                          strstr(prop, "Dynamic Code Evolution") != NULL;
+        _zero_vm = strstr(prop, "Zero") != NULL;
         _jvmti->Deallocate((unsigned char*)prop);
 
         if (is_hotspot && _jvmti->GetSystemProperty("java.vm.version", &prop) == 0) {
@@ -117,7 +134,6 @@ bool VM::init(JavaVM* vm, bool attach) {
     callbacks.MonitorContendedEntered = LockTracer::MonitorContendedEntered;
     _jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks));
 
-    _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_DEATH, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_LOAD, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, NULL);
@@ -130,6 +146,8 @@ bool VM::init(JavaVM* vm, bool attach) {
         DisableSweeper ds;
         _jvmti->GenerateEvents(JVMTI_EVENT_DYNAMIC_CODE_GENERATED);
         _jvmti->GenerateEvents(JVMTI_EVENT_COMPILED_METHOD_LOAD);
+    } else {
+        _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL);
     }
 
     if (hotspot_version() > 0 && hotspot_version() < 11) {
@@ -152,6 +170,9 @@ void VM::ready() {
     if (libjvm != NULL) {
         JitWriteProtection jit(true);  // workaround for JDK-8262896
         VMStructs::init(libjvm);
+        if (_zero_vm) {
+            libjvm->mark(isZeroInterpreterMethod);
+        }
     }
 
     profiler->setupTrapHandler();
@@ -218,7 +239,7 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
     // Delayed start of profiler if agent has been loaded at VM bootstrap
     Error error = Profiler::instance()->run(_agent_args);
     if (error) {
-        Log::error(error.message());
+        Log::error("%s", error.message());
     }
 }
 
@@ -277,7 +298,7 @@ Agent_OnLoad(JavaVM* vm, char* options, void* reserved) {
     Error error = _agent_args.parse(options);
     Log::open(_agent_args._log);
     if (error) {
-        Log::error(error.message());
+        Log::error("%s", error.message());
         return ARGUMENTS_ERROR;
     }
 
@@ -295,7 +316,7 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
     Error error = args.parse(options);
     Log::open(args._log);
     if (error) {
-        Log::error(error.message());
+        Log::error("%s", error.message());
         return ARGUMENTS_ERROR;
     }
 
@@ -311,7 +332,7 @@ Agent_OnAttach(JavaVM* vm, char* options, void* reserved) {
 
     error = Profiler::instance()->run(args);
     if (error) {
-        Log::error(error.message());
+        Log::error("%s", error.message());
         return COMMAND_ERROR;
     }
 
@@ -326,4 +347,12 @@ JNI_OnLoad(JavaVM* vm, void* reserved) {
 
     JavaAPI::registerNatives(VM::jvmti(), VM::jni());
     return JNI_VERSION_1_6;
+}
+
+extern "C" JNIEXPORT void JNICALL
+JNI_OnUnload(JavaVM* vm, void* reserved) {
+    Profiler* profiler = Profiler::instance();
+    if (profiler != NULL) {
+        profiler->stop();
+    }
 }

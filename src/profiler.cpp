@@ -32,6 +32,7 @@
 #include "itimer.h"
 #include "flameGraph.h"
 #include "flightRecorder.h"
+#include "fdtransferClient.h"
 #include "frameName.h"
 #include "os.h"
 #include "stackFrame.h"
@@ -66,6 +67,7 @@ enum StackRecovery {
 };
 
 
+// The same constants are used in JfrSync
 enum EventMask {
     EM_CPU   = 1,
     EM_ALLOC = 2,
@@ -94,6 +96,8 @@ void Profiler::addJavaMethod(const void* address, int length, jmethodID method) 
     _jit_lock.lock();
     _java_methods.add(address, length, method, true);
     _jit_lock.unlock();
+
+    CodeHeap::updateBounds(address, (const char*)address + length);
 }
 
 void Profiler::removeJavaMethod(const void* address, jmethodID method) {
@@ -112,6 +116,8 @@ void Profiler::addRuntimeStub(const void* address, int length, const char* name)
     _stubs_lock.lock();
     _runtime_stubs.add(address, length, name, true);
     _stubs_lock.unlock();
+
+    CodeHeap::updateBounds(address, (const char*)address + length);
 }
 
 void Profiler::onThreadStart(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
@@ -213,6 +219,19 @@ const void* Profiler::resolveSymbol(const char* name) {
     return NULL;
 }
 
+// For BCI_NATIVE_FRAME, library index is encoded ahead of the symbol name
+const char* Profiler::getLibraryName(const char* native_symbol) {
+    short lib_index = NativeFunc::libIndex(native_symbol);
+    if (lib_index >= 0 && lib_index < _native_lib_count) {
+        const char* s = _native_libs[lib_index]->name();
+        if (s != NULL) {
+            const char* p = strrchr(s, '/');
+            return p != NULL ? p + 1 : s;
+        }
+    }
+    return NULL;
+}
+
 NativeCodeCache* Profiler::findNativeLibraryBySymbol(const char* name) {
     for (int i = 0; i < _native_lib_count; i++) {
         if (_native_libs[i]->findSymbol(name) != NULL) {
@@ -251,19 +270,25 @@ bool Profiler::inJavaCode(void* ucontext) {
         _stubs_lock.unlockShared();
         return method == NULL || strcmp((const char*)method, "call_stub") != 0;
     }
-    return _java_methods.contains(pc);
+    return CodeHeap::contains(pc);
 }
 
 int Profiler::getNativeTrace(Engine* engine, void* ucontext, ASGCT_CallFrame* frames, int tid) {
     const void* native_callchain[MAX_NATIVE_FRAMES];
-    int native_frames = engine->getNativeTrace(ucontext, tid, native_callchain, MAX_NATIVE_FRAMES,
-                                               &_java_methods, &_runtime_stubs);
+    int native_frames = engine->getNativeTrace(ucontext, tid, native_callchain, MAX_NATIVE_FRAMES);
 
     int depth = 0;
     jmethodID prev_method = NULL;
 
     for (int i = 0; i < native_frames; i++) {
-        jmethodID current_method = (jmethodID)findNativeMethod(native_callchain[i]);
+        const char* current_method_name = findNativeMethod(native_callchain[i]);
+        if (current_method_name != NULL && NativeFunc::isMarked(current_method_name)) {
+            // This is C++ interpreter frame, this and later frames should be reported
+            // as Java frames returned by AGCT. Terminate the scan here.
+            return depth;
+        }
+
+        jmethodID current_method = (jmethodID)current_method_name;
         if (current_method == prev_method && _cstack == CSTACK_LBR) {
             // Skip duplicates in LBR stack, where branch_stack[N].from == branch_stack[N+1].to
             prev_method = NULL;
@@ -320,7 +345,7 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
 
         // Stack might not be walkable if some temporary values are pushed onto the stack
         // above the expected frame SP
-        if (!(_safe_mode & MOVE_SP)) {
+        if (!(_safe_mode & MOVE_SP) && CAN_MOVE_SP) {
             for (int extra_stack_slots = 1; extra_stack_slots <= 2; extra_stack_slots++) {
                 top_frame.sp() = sp + extra_stack_slots * sizeof(uintptr_t);
                 VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
@@ -359,9 +384,27 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
                 }
             }
 
+            // Try to find the previous frame by looking a few top stack slots
+            // for something that resembles a return address
+            if (!(_safe_mode & SCAN_STACK)) {
+                for (int slot = 0; slot < StackFrame::callerLookupSlots(); slot++) {
+                    instruction_t* caller_pc = (instruction_t*)top_frame.stackAt(slot) - 1;
+                    if (getAddressType(caller_pc) != ADDR_UNKNOWN) {
+                        top_frame.pc() = (uintptr_t)caller_pc;
+                        top_frame.sp() = sp + (slot + 1) * sizeof(uintptr_t);
+                        VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
+                        top_frame.restore(pc, sp, fp);
+
+                        if (trace.num_frames > 0) {
+                            return trace.num_frames + (trace.frames - frames);
+                        }
+                    }
+                }
+            }
+
             // Retry moving stack pointer, but now in wider range: 3 to 6 slots.
             // Helps to recover from String.indexOf() intrinsic
-            if (!(_safe_mode & MOVE_SP2)) {
+            if (!(_safe_mode & MOVE_SP2) && CAN_MOVE_SP) {
                 ASGCT_CallFrame* prev_frames = trace.frames;
                 trace.frames = frames;
                 for (int extra_stack_slots = 3; extra_stack_slots <= 6; extra_stack_slots = (extra_stack_slots - 1) << 1) {
@@ -374,23 +417,6 @@ int Profiler::getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max
                     }
                 }
                 trace.frames = prev_frames;
-            }
-
-            // Try to find the previous frame by looking a few top stack slots
-            // for something that resembles a return address
-            if (!(_safe_mode & SCAN_STACK)) {
-                for (int slot = 0; slot < StackFrame::callerLookupSlots(); slot++) {
-                    if (getAddressType((instruction_t*)top_frame.stackAt(slot)) != ADDR_UNKNOWN) {
-                        top_frame.pc() = top_frame.stackAt(slot);
-                        top_frame.sp() = sp + (slot + 1) * sizeof(uintptr_t);
-                        VM::_asyncGetCallTrace(&trace, max_depth, ucontext);
-                        top_frame.restore(pc, sp, fp);
-
-                        if (trace.num_frames > 0) {
-                            return trace.num_frames + (trace.frames - frames);
-                        }
-                    }
-                }
             }
         }
     } else if (trace.num_frames == ticks_unknown_not_Java && !(_safe_mode & LAST_JAVA_PC)) {
@@ -631,7 +657,7 @@ void Profiler::recordSample(void* ucontext, u64 counter, jint event_type, Event*
         num_frames += makeEventFrame(frames + num_frames, BCI_THREAD_ID, tid);
     }
     if (_add_sched_frame) {
-        num_frames += makeEventFrame(frames + num_frames, BCI_NATIVE_FRAME, (uintptr_t)OS::schedPolicy());
+        num_frames += makeEventFrame(frames + num_frames, BCI_ERROR, (uintptr_t)OS::schedPolicy());
     }
 
     u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter);
@@ -865,6 +891,12 @@ Error Profiler::start(Arguments& args, bool reset) {
         return Error("Only JFR output supports multiple events");
     }
 
+    if (args._fdtransfer) {
+        if (!FdTransferClient::connectToServer(args._fdtransfer_path, OS::processId())) {
+            return Error("Failed to initialize FdTransferClient");
+        }
+    }
+
     if (reset || _start_time == 0) {
         // Reset counters
         _total_samples = 0;
@@ -896,8 +928,6 @@ Error Profiler::start(Arguments& args, bool reset) {
         }
     }
 
-    updateSymbols(args._ring != RING_USER);
-
     _safe_mode = args._safe_mode;
     if (VM::hotspot_version() < 8) {
         // Cannot use JVM TI stack walker during GC on non-HotSpot JVMs or with PermGen
@@ -914,6 +944,9 @@ Error Profiler::start(Arguments& args, bool reset) {
     if (_cstack == CSTACK_LBR && _engine != &perf_events) {
         return Error("Branch stack is supported only with PMU events");
     }
+
+    // Kernel symbols are useful only for perf_events without --all-user
+    updateSymbols(_engine == &perf_events && args._ring != RING_USER);
 
     error = installTraps(args._begin, args._end);
     if (error) {
@@ -995,6 +1028,7 @@ Error Profiler::stop() {
     _jfr.stop();
     unlockAll();
 
+    FdTransferClient::closePeer();
     _state = IDLE;
     return Error::OK;
 }
@@ -1206,7 +1240,7 @@ void Profiler::dumpText(std::ostream& out, Arguments& args) {
             out << buf;
         }
     }
-    out << std::endl;
+    out << "\n";
 
     double cpercent = 100.0 / total_counter;
     const char* units_str = activeEngine()->units();
@@ -1264,7 +1298,7 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
             if (error) {
                 return error;
             }
-            out << "Profiling started" << std::endl;
+            out << "Profiling started\n";
             break;
         }
         case ACTION_STOP: {
@@ -1273,7 +1307,7 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
                 if (error) {
                     return error;
                 }
-                out << "Profiling stopped after " << uptime() << " seconds. No dump options specified" << std::endl;
+                out << "Profiling stopped after " << uptime() << " seconds. No dump options specified\n";
                 break;
             }
             // Fall through
@@ -1290,36 +1324,36 @@ Error Profiler::runInternal(Arguments& args, std::ostream& out) {
             if (error) {
                 return error;
             }
-            out << "OK" << std::endl;
+            out << "OK\n";
             break;
         }
         case ACTION_STATUS: {
             MutexLocker ml(_state_lock);
             if (_state == RUNNING) {
-                out << "Profiling is running for " << uptime() << " seconds" << std::endl;
+                out << "Profiling is running for " << uptime() << " seconds\n";
             } else {
-                out << "Profiler is not active" << std::endl;
+                out << "Profiler is not active\n";
             }
             break;
         }
         case ACTION_LIST: {
-            out << "Basic events:" << std::endl;
-            out << "  " << EVENT_CPU << std::endl;
-            out << "  " << EVENT_ALLOC << std::endl;
-            out << "  " << EVENT_LOCK << std::endl;
-            out << "  " << EVENT_WALL << std::endl;
-            out << "  " << EVENT_ITIMER << std::endl;
+            out << "Basic events:\n";
+            out << "  " << EVENT_CPU << "\n";
+            out << "  " << EVENT_ALLOC << "\n";
+            out << "  " << EVENT_LOCK << "\n";
+            out << "  " << EVENT_WALL << "\n";
+            out << "  " << EVENT_ITIMER << "\n";
 
-            out << "Java method calls:" << std::endl;
-            out << "  ClassName.methodName" << std::endl;
+            out << "Java method calls:\n";
+            out << "  ClassName.methodName\n";
 
             if (PerfEvents::supported()) {
-                out << "Perf events:" << std::endl;
+                out << "Perf events:\n";
                 // The first perf event is "cpu" which is already printed
                 for (int event_id = 1; ; event_id++) {
                     const char* event_name = PerfEvents::getEventName(event_id);
                     if (event_name == NULL) break;
-                    out << "  " << event_name << std::endl;
+                    out << "  " << event_name << "\n";
                 }
             }
             break;
@@ -1359,7 +1393,7 @@ void Profiler::shutdown(Arguments& args) {
         args._action = ACTION_STOP;
         Error error = run(args);
         if (error) {
-            Log::error(error.message());
+            Log::error("%s", error.message());
         }
     }
 

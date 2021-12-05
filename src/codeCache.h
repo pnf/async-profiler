@@ -23,7 +23,38 @@
 #define NO_MIN_ADDRESS  ((const void*)-1)
 #define NO_MAX_ADDRESS  ((const void*)0)
 
+typedef bool (*NamePredicate)(const char* name);
+
 const int INITIAL_CODE_CACHE_CAPACITY = 1000;
+
+
+class NativeFunc {
+  private:
+    short _lib_index;
+    char _mark;
+    char _reserved;
+    char _name[0];
+
+    static NativeFunc* from(const char* name) {
+        return (NativeFunc*)(name - sizeof(NativeFunc));
+    }
+
+  public:
+    static char* create(const char* name, short lib_index);
+    static void destroy(char* name);
+
+    static short libIndex(const char* name) {
+        return from(name)->_lib_index;
+    }
+
+    static bool isMarked(const char* name) {
+        return from(name)->_mark != 0;
+    }
+
+    static void mark(const char* name) {
+        from(name)->_mark = 1;
+    }
+};
 
 
 class CodeBlob {
@@ -89,11 +120,16 @@ class CodeCache {
 class NativeCodeCache : public CodeCache {
   private:
     char* _name;
+    short _lib_index;
+
     const void** _got_start;
     const void** _got_end;
 
+    static char* encodeLibrarySymbol(const char* name, short lib_index);
+
   public:
     NativeCodeCache(const char* name,
+                    short lib_index = -1,
                     const void* min_address = NO_MIN_ADDRESS,
                     const void* max_address = NO_MAX_ADDRESS);
 
@@ -126,11 +162,14 @@ class NativeCodeCache : public CodeCache {
 
     void add(const void* start, int length, const char* name, bool update_bounds = false);
     void sort();
+
     const char* binarySearch(const void* address);
     const void* findSymbol(const char* name);
     const void* findSymbolByPrefix(const char* prefix);
     const void* findSymbolByPrefix(const char* prefix, int prefix_len);
     const void** findGOTEntry(const void* address);
+
+    void mark(NamePredicate predicate);
 };
 
 #endif // _CODECACHE_H
