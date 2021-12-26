@@ -44,7 +44,6 @@ AsyncGetCallTrace VM::_asyncGetCallTrace;
 JVM_GetManagement VM::_getManagement;
 jvmtiError (JNICALL *VM::_orig_RedefineClasses)(jvmtiEnv*, jint, const jvmtiClassDefinition*);
 jvmtiError (JNICALL *VM::_orig_RetransformClasses)(jvmtiEnv*, jint, const jclass* classes);
-jvmtiError (JNICALL *VM::_orig_GenerateEvents)(jvmtiEnv* jvmti, jvmtiEvent event_type);
 volatile int VM::_in_redefine_classes = 0;
 
 
@@ -126,7 +125,6 @@ bool VM::init(JavaVM* vm, bool attach) {
     callbacks.ClassPrepare = ClassPrepare;
     callbacks.ClassFileLoadHook = Instrument::ClassFileLoadHook;
     callbacks.CompiledMethodLoad = Profiler::CompiledMethodLoad;
-    callbacks.CompiledMethodUnload = Profiler::CompiledMethodUnload;
     callbacks.DynamicCodeGenerated = Profiler::DynamicCodeGenerated;
     callbacks.ThreadStart = Profiler::ThreadStart;
     callbacks.ThreadEnd = Profiler::ThreadEnd;
@@ -138,23 +136,14 @@ bool VM::init(JavaVM* vm, bool attach) {
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_LOAD, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_COMPILED_METHOD_LOAD, NULL);
-    _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_COMPILED_METHOD_UNLOAD, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_DYNAMIC_CODE_GENERATED, NULL);
 
     if (attach) {
         loadAllMethodIDs(jvmti(), jni());
-        DisableSweeper ds;
         _jvmti->GenerateEvents(JVMTI_EVENT_DYNAMIC_CODE_GENERATED);
         _jvmti->GenerateEvents(JVMTI_EVENT_COMPILED_METHOD_LOAD);
     } else {
         _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL);
-    }
-
-    if (hotspot_version() > 0 && hotspot_version() < 11) {
-        // Avoid GenerateEvents conflict with another agent
-        JVMTIFunctions* functions = *(JVMTIFunctions**)_jvmti;
-        _orig_GenerateEvents = functions->GenerateEvents;
-        functions->GenerateEvents = GenerateEventsHook;
     }
 
     OS::installSignalHandler(WAKEUP_SIGNAL, NULL, wakeupHandler);
@@ -166,7 +155,7 @@ bool VM::init(JavaVM* vm, bool attach) {
 void VM::ready() {
     Profiler* profiler = Profiler::instance();
     profiler->updateSymbols(false);
-    NativeCodeCache* libjvm = profiler->findNativeLibrary((const void*)_asyncGetCallTrace);
+    CodeCache* libjvm = profiler->findNativeLibrary((const void*)_asyncGetCallTrace);
     if (libjvm != NULL) {
         JitWriteProtection jit(true);  // workaround for JDK-8262896
         VMStructs::init(libjvm);
@@ -285,15 +274,6 @@ jvmtiError VM::RetransformClassesHook(jvmtiEnv* jvmti, jint class_count, const j
 
     atomicInc(_in_redefine_classes, -1);
     return result;
-}
-
-jvmtiError VM::GenerateEventsHook(jvmtiEnv* jvmti, jvmtiEvent event_type) {
-    if (event_type == JVMTI_EVENT_COMPILED_METHOD_LOAD) {
-        // Workaround for JDK-8222072: prepare to receive events designated for another agent
-        Log::warn("async-profiler conflicts with another agent calling GenerateEvents()");
-        Profiler::instance()->resetJavaMethods();
-    }
-    return _orig_GenerateEvents(jvmti, event_type);
 }
 
 

@@ -22,7 +22,7 @@
 #include "vmEntry.h"
 
 
-NativeCodeCache* VMStructs::_libjvm = NULL;
+CodeCache* VMStructs::_libjvm = NULL;
 
 bool VMStructs::_has_class_names = false;
 bool VMStructs::_has_class_loader_data = false;
@@ -44,6 +44,12 @@ int VMStructs::_anchor_sp_offset = -1;
 int VMStructs::_anchor_pc_offset = -1;
 int VMStructs::_frame_size_offset = -1;
 int VMStructs::_is_gc_active_offset = -1;
+int VMStructs::_code_heap_memory_offset = -1;
+int VMStructs::_code_heap_segmap_offset = -1;
+int VMStructs::_code_heap_segment_shift = -1;
+int VMStructs::_vs_low_offset = -1;
+int VMStructs::_vs_high_offset = -1;
+char* VMStructs::_code_heap[3] = {};
 char* VMStructs::_collected_heap_addr = NULL;
 const void* VMStructs::_code_heap_low = NO_MIN_ADDRESS;
 const void* VMStructs::_code_heap_high = NO_MAX_ADDRESS;
@@ -55,11 +61,8 @@ int VMStructs::_tls_index = -1;
 intptr_t VMStructs::_env_offset;
 
 VMStructs::GetStackTraceFunc VMStructs::_get_stack_trace = NULL;
-VMStructs::FindBlobFunc VMStructs::_find_blob = NULL;
 VMStructs::LockFunc VMStructs::_lock_func;
 VMStructs::LockFunc VMStructs::_unlock_func;
-char* VMStructs::_method_flushing = NULL;
-int* VMStructs::_sweep_started = NULL;
 
 
 uintptr_t VMStructs::readSymbol(const char* symbol_name) {
@@ -71,7 +74,7 @@ uintptr_t VMStructs::readSymbol(const char* symbol_name) {
     return *(uintptr_t*)symbol;
 }
 
-void VMStructs::init(NativeCodeCache* libjvm) {
+void VMStructs::init(CodeCache* libjvm) {
     _libjvm = libjvm;
 
     initOffsets();
@@ -95,10 +98,11 @@ void VMStructs::initOffsets() {
         return;
     }
 
-    char* code_heap_addr = NULL;
-    int code_heap_memory_offset = -1;
-    int vs_low_offset = -1;
-    int vs_high_offset = -1;
+    char* code_heaps = NULL;
+    int array_data_offset = -1;
+    int segment_size_offset = -1;
+    int vs_low_bound_offset = -1;
+    int vs_high_bound_offset = -1;
 
     while (true) {
         const char* type = *(const char**)(entry + type_offset);
@@ -158,7 +162,9 @@ void VMStructs::initOffsets() {
             }
         } else if (strcmp(type, "CodeCache") == 0) {
             if (strcmp(field, "_heap") == 0) {
-                code_heap_addr = **(char***)(entry + address_offset);
+                _code_heap[0] = **(char***)(entry + address_offset);
+            } else if (strcmp(field, "_heaps") == 0) {
+                code_heaps = **(char***)(entry + address_offset);
             } else if (strcmp(field, "_high_bound") == 0) {
                 _code_heap_high = **(const void***)(entry + address_offset);
             } else if (strcmp(field, "_low_bound") == 0) {
@@ -166,13 +172,25 @@ void VMStructs::initOffsets() {
             }
         } else if (strcmp(type, "CodeHeap") == 0) {
             if (strcmp(field, "_memory") == 0) {
-                code_heap_memory_offset = *(int*)(entry + offset_offset);
+                _code_heap_memory_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "_segmap") == 0) {
+                _code_heap_segmap_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "_log2_segment_size") == 0) {
+                segment_size_offset = *(int*)(entry + offset_offset);
             }
         } else if (strcmp(type, "VirtualSpace") == 0) {
             if (strcmp(field, "_low_boundary") == 0) {
-                vs_low_offset = *(int*)(entry + offset_offset);
+                vs_low_bound_offset = *(int*)(entry + offset_offset);
             } else if (strcmp(field, "_high_boundary") == 0) {
-                vs_high_offset = *(int*)(entry + offset_offset);
+                vs_high_bound_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "_low") == 0) {
+                _vs_low_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "_high") == 0) {
+                _vs_high_offset = *(int*)(entry + offset_offset);
+            }
+        } else if (strcmp(type, "GrowableArray<int>") == 0) {
+            if (strcmp(field, "_data") == 0) {
+                array_data_offset = *(int*)(entry + offset_offset);
             }
         } else if (strcmp(type, "Universe") == 0) {
             if (strcmp(field, "_collectedHeap") == 0) {
@@ -194,24 +212,26 @@ void VMStructs::initOffsets() {
             && _symbol_body_offset >= 0
             && _klass != NULL;
 
-    if (code_heap_addr != NULL && code_heap_memory_offset >= 0 && vs_low_offset >= 0 && vs_high_offset >= 0) {
-        _code_heap_low = *(const void**)(code_heap_addr + code_heap_memory_offset + vs_low_offset);
-        _code_heap_high = *(const void**)(code_heap_addr + code_heap_memory_offset + vs_high_offset);
+    if (_code_heap[0] != NULL && _code_heap_memory_offset >= 0 && vs_low_bound_offset >= 0 && vs_high_bound_offset >= 0) {
+        _code_heap_low = *(const void**)(_code_heap[0] + _code_heap_memory_offset + vs_low_bound_offset);
+        _code_heap_high = *(const void**)(_code_heap[0] + _code_heap_memory_offset + vs_high_bound_offset);
+    } else if (code_heaps != NULL && array_data_offset >= 0 && *(unsigned int*)code_heaps <= 3) {
+        unsigned int code_heap_count = *(unsigned int*)code_heaps;
+        char* code_heap_array = *(char**)(code_heaps + array_data_offset);
+        memcpy(_code_heap, code_heap_array, code_heap_count * sizeof(_code_heap[0]));
+    }
+
+    // Invariant: _code_heap[i] != NULL iff all CodeHeap structures are available
+    if (_code_heap[0] != NULL && segment_size_offset >= 0 && _code_heap_memory_offset >= 0 && _code_heap_segmap_offset >= 0) {
+        _code_heap_segment_shift = *(int*)(_code_heap[0] + segment_size_offset);
+    }
+    if (_code_heap_segment_shift < 0 || _code_heap_segment_shift > 16) {
+        memset(_code_heap, 0, sizeof(_code_heap));
     }
 }
 
 void VMStructs::initJvmFunctions() {
-    _get_stack_trace = (GetStackTraceFunc)_libjvm->findSymbol("_ZN8JvmtiEnv13GetStackTraceEP10JavaThreadiiP15_jvmtiFrameInfoPi");
-    if (_get_stack_trace == NULL) {
-        _get_stack_trace = (GetStackTraceFunc)_libjvm->findSymbol("_ZN8JvmtiEnv13GetStackTraceEP10JavaThreadiiP14jvmtiFrameInfoPi");
-    }
-
-    if (_frame_size_offset >= 0) {
-        _find_blob = (FindBlobFunc)_libjvm->findSymbol("_ZN9CodeCache16find_blob_unsafeEPv");
-        if (_find_blob == NULL) {
-            _find_blob = (FindBlobFunc)_libjvm->findSymbol("_ZN9CodeCache9find_blobEPv");
-        }
-    }
+    _get_stack_trace = (GetStackTraceFunc)_libjvm->findSymbolByPrefix("_ZN8JvmtiEnv13GetStackTraceEP10JavaThreadiiP");
 
     if (VM::hotspot_version() == 8 && _class_loader_data_offset >= 0 &&
         _class_loader_data_next_offset == sizeof(uintptr_t) * 8 + 8 &&
@@ -220,11 +240,6 @@ void VMStructs::initJvmFunctions() {
         _lock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor28lock_without_safepoint_checkEv");
         _unlock_func = (LockFunc)_libjvm->findSymbol("_ZN7Monitor6unlockEv");
         _has_class_loader_data = _lock_func != NULL && _unlock_func != NULL;
-    }
-
-    if (VM::hotspot_version() > 0 && VM::hotspot_version() < 11) {
-        _method_flushing = (char*)_libjvm->findSymbol("MethodFlushing");
-        _sweep_started = (int*)_libjvm->findSymbol("_ZN14NMethodSweeper14_sweep_startedE");
     }
 }
 
@@ -278,26 +293,18 @@ VMThread* VMThread::current() {
     return (VMThread*)pthread_getspecific((pthread_key_t)_tls_index);
 }
 
-DisableSweeper::DisableSweeper() {
-    // Workaround for JDK-8212160: Temporarily disable MethodFlushing
-    // while generating initial set of CompiledMethodLoad events
-    _enabled = _method_flushing != NULL && *_method_flushing;
-    if (!_enabled) return;
+NMethod* CodeHeap::findNMethod(char* heap, const void* pc) {
+    unsigned char* heap_start = *(unsigned char**)(heap + _code_heap_memory_offset + _vs_low_offset);
+    unsigned char* segmap = *(unsigned char**)(heap + _code_heap_segmap_offset + _vs_low_offset);
+    size_t idx = ((unsigned char*)pc - heap_start) >> _code_heap_segment_shift;
 
-    *_method_flushing = 0;
-    __sync_synchronize();
-
-    // Wait a bit in case sweeping has already started
-    for (int i = 0; i < 4; i++) {
-        if (_sweep_started == NULL || *_sweep_started) {
-            usleep(1000);
-        }
+    if (segmap[idx] == 0xff) {
+        return NULL;
     }
-}
+    while (segmap[idx] > 0) {
+        idx -= segmap[idx];
+    }
 
-DisableSweeper::~DisableSweeper() {
-    if (!_enabled) return;
-
-    *_method_flushing = 1;
-    __sync_synchronize();
+    unsigned char* block = heap_start + (idx << _code_heap_segment_shift);
+    return block[sizeof(size_t)] ? (NMethod*)(block + 2 * sizeof(size_t)) : NULL;
 }
