@@ -49,6 +49,11 @@ int VMStructs::_code_heap_segmap_offset = -1;
 int VMStructs::_code_heap_segment_shift = -1;
 int VMStructs::_vs_low_offset = -1;
 int VMStructs::_vs_high_offset = -1;
+int VMStructs::_flag_name_offset = -1;
+int VMStructs::_flag_addr_offset = -1;
+const char* VMStructs::_flags_addr = NULL;
+int VMStructs::_flag_count = 0;
+int VMStructs::_flag_size = 0;
 char* VMStructs::_code_heap[3] = {};
 char* VMStructs::_collected_heap_addr = NULL;
 const void* VMStructs::_code_heap_low = NO_MIN_ADDRESS;
@@ -104,7 +109,7 @@ void VMStructs::initOffsets() {
     int vs_low_bound_offset = -1;
     int vs_high_bound_offset = -1;
 
-    while (true) {
+    for (;; entry += stride) {
         const char* type = *(const char**)(entry + type_offset);
         const char* field = *(const char**)(entry + field_offset);
         if (type == NULL || field == NULL) {
@@ -192,6 +197,16 @@ void VMStructs::initOffsets() {
             if (strcmp(field, "_data") == 0) {
                 array_data_offset = *(int*)(entry + offset_offset);
             }
+        } else if (strcmp(type, "JVMFlag") == 0 || strcmp(type, "Flag") == 0) {
+            if (strcmp(field, "_name") == 0 || strcmp(field, "name") == 0) {
+                _flag_name_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "_addr") == 0 || strcmp(field, "addr") == 0) {
+                _flag_addr_offset = *(int*)(entry + offset_offset);
+            } else if (strcmp(field, "flags") == 0) {
+                _flags_addr = **(char***)(entry + address_offset);
+            } else if (strcmp(field, "numFlags") == 0) {
+                _flag_count = **(int**)(entry + address_offset);
+            }
         } else if (strcmp(type, "Universe") == 0) {
             if (strcmp(field, "_collectedHeap") == 0) {
                 _collected_heap_addr = **(char***)(entry + address_offset);
@@ -203,8 +218,27 @@ void VMStructs::initOffsets() {
         } else if (strcmp(type, "PermGen") == 0) {
             _has_perm_gen = true;
         }
+    }
 
-        entry += stride;
+    entry = readSymbol("gHotSpotVMTypes");
+    stride = readSymbol("gHotSpotVMTypeEntryArrayStride");
+    type_offset = readSymbol("gHotSpotVMTypeEntryTypeNameOffset");
+    uintptr_t size_offset = readSymbol("gHotSpotVMTypeEntrySizeOffset");
+
+    if (entry == 0 || stride == 0) {
+        return;
+    }
+
+    for (;; entry += stride) {
+        const char* type = *(const char**)(entry + type_offset);
+        if (type == NULL) {
+            break;
+        }
+
+        if (strcmp(type, "JVMFlag") == 0 || strcmp(type, "Flag") == 0) {
+            _flag_size = *(int*)(entry + size_offset);
+            break;
+        }
     }
 
     _has_class_names = _klass_name_offset >= 0
@@ -307,4 +341,16 @@ NMethod* CodeHeap::findNMethod(char* heap, const void* pc) {
 
     unsigned char* block = heap_start + (idx << _code_heap_segment_shift);
     return block[sizeof(size_t)] ? (NMethod*)(block + 2 * sizeof(size_t)) : NULL;
+}
+
+void* JVMFlag::find(const char* name) {
+    if (_flags_addr != NULL && _flag_size > 0) {
+        for (int i = 0; i < _flag_count; i++) {
+            JVMFlag* f = (JVMFlag*)(_flags_addr + i * _flag_size);
+            if (f->name() != NULL && strcmp(f->name(), name) == 0) {
+                return f->addr();
+            }
+        }
+    }
+    return NULL;
 }

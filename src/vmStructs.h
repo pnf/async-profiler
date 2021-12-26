@@ -51,6 +51,11 @@ class VMStructs {
     static int _code_heap_segment_shift;
     static int _vs_low_offset;
     static int _vs_high_offset;
+    static int _flag_name_offset;
+    static int _flag_addr_offset;
+    static const char* _flags_addr;
+    static int _flag_count;
+    static int _flag_size;
     static char* _code_heap[3];
     static char* _collected_heap_addr;
     static const void* _code_heap_low;
@@ -274,6 +279,19 @@ class CodeHeap : VMStructs {
         if (contains(_code_heap[1], pc)) return findNMethod(_code_heap[1], pc);
         if (contains(_code_heap[2], pc)) return findNMethod(_code_heap[2], pc);
         return NULL;
+    }
+};
+
+class JVMFlag : VMStructs {
+  public:
+    static void* find(const char* name);
+
+    const char* name() {
+        return *(const char**) at(_flag_name_offset);
+    }
+
+    void* addr() {
+        return *(void**) at(_flag_addr_offset);
     }
 };
 
