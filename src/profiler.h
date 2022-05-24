@@ -62,6 +62,40 @@ enum State {
     TERMINATED
 };
 
+enum AwaitFrameType {
+  AW_METHOD =1,
+  AW_STRING =2
+};
+
+class FrameIterator {
+private:
+  CallTrace* traces[10];
+  int positions[10];
+
+  std::map<jmethodID, CallTrace*> awaitTraces;
+  int depth;
+  int i;
+public:
+  FrameIterator(std::vector<CallTraceSample*> &samples);
+  FrameIterator(std::vector<CallTraceSample> &samples);
+  void set(CallTrace* trace_, bool reversed, int ignore_last = 0);
+  int setAndCount(CallTrace* trace_, bool reversed, int ignore_last = 0);
+  ASGCT_CallFrame* prev();
+  ASGCT_CallFrame* next();
+  ASGCT_CallFrame* nextIgnoringLast();
+};
+
+typedef struct AwaitData_ {
+    // When sampling occurs, we will search for a method_id == insertionId
+    jmethodID insertionId;
+    // If we find it, then we will replace method_id in that frame with
+    long stackId;
+    // And we will also put the value of
+    long sampledSignalToSet;
+    // into
+    long sampledSignal;
+} AwaitData;
+
 class Profiler {
   private:
     Mutex _state_lock;
@@ -152,6 +186,9 @@ class Profiler {
     void dumpFlameGraph(std::ostream& out, Arguments& args, bool tree);
     void dumpText(std::ostream& out, Arguments& args);
 
+    AwaitData* awaitData();
+    AwaitData* maybeInitAwaitData();
+
     static Profiler* const _instance;
 
   public:
@@ -182,6 +219,10 @@ class Profiler {
     static Profiler* instance() {
         return _instance;
     }
+
+    long setAwaitStackId(long, long, jmethodID);
+    long getAwaitSampledSignal();
+    long saveAwaitFrames(AwaitFrameType,long*,int);
 
     u64 total_samples() { return _total_samples; }
     time_t uptime()     { return time(NULL) - _start_time; }
