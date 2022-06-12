@@ -77,7 +77,7 @@ JfrMetadata::JfrMetadata() : Element("root") {
                 << field("hidden", T_BOOLEAN, "Hidden"))
 
             << (type("jdk.types.Package", T_PACKAGE, "Package")
-                << field("name", T_SYMBOL, "Name", F_CPOOL))
+                    << field("name", T_SYMBOL, "Name", F_CPOOL))
 
             << (type("jdk.types.Symbol", T_SYMBOL, "Symbol", true)
                 << field("string", T_STRING, "String"))
@@ -236,6 +236,6 @@ JfrMetadata::JfrMetadata() : Element("root") {
 
         << element("region").attribute("locale", "en_US").attribute("gmtOffset", "0");
 
-    // The map is used only during construction
-    _string_map.clear();
+    // The map is used only during construction, but we need to keep it around for custom attributes.
+    // _string_map.clear();
 }

@@ -62,6 +62,51 @@ enum State {
     TERMINATED
 };
 
+enum AwaitFrameType {
+  AW_METHOD =1,
+  AW_STRING =2
+};
+
+// Iterates over frames with (potentially) inserted await stacks
+class FrameIterator {
+private:
+  static const int MAX_DEPTH = 5;
+  CallTrace* traceStack[MAX_DEPTH];
+  int positionStack[MAX_DEPTH];
+  std::map<jmethodID, CallTrace*> awaitTraces;
+  int depth = 0;
+  int i = 0;
+  bool hasAwaits = false;
+  void addAwaitTrace(CallTrace* trace) {
+    if(trace->frames[0].bci == BCI_AWAIT_MARKER) {
+        awaitTraces[trace->frames[0].method_id] = trace;
+        hasAwaits = true;
+    }
+  }
+public:
+  FrameIterator(std::vector<CallTraceSample*> &samples, bool savedAwaitStacks);
+    FrameIterator(std::vector<CallTraceSample> &samples, bool savedAwaitStacks);
+    FrameIterator(std::map<long long unsigned int, CallTraceSample> &samples, bool savedAwaitStacks);
+  void set(CallTrace* trace_, bool reversed, int ignore_last = 0);
+  int setAndCount(CallTrace* trace_, bool reversed, int ignore_last = 0);
+  ASGCT_CallFrame* prev();
+  ASGCT_CallFrame* next();
+};
+
+static const int MAX_AWAIT_STACKS = 10;
+
+typedef struct AwaitData_ {
+    // The order of fields is important if getAwaitDataAddress() is used.
+    // When sampling occurs, we will search for a method_id == insertionId.
+    // Starting from the innermost frame, we replace matching ids with successive
+    // elements of stackId.
+    // And we put the value sampledSignalToSet into sampledSignal
+    long insertionId;
+    long sampledSignalToSet;
+    long sampledSignal;
+    long stackId[MAX_AWAIT_STACKS+1];
+} AwaitData;
+
 class Profiler {
   private:
     Mutex _state_lock;
@@ -154,6 +199,12 @@ class Profiler {
     void dumpFlameGraph(std::ostream& out, Arguments& args, bool tree);
     void dumpText(std::ostream& out, Arguments& args);
 
+    void recordSampleJfr(u64 trace_id, u64 counter, jint event_type, Event* event);
+
+    AwaitData* awaitData();
+    AwaitData* maybeInitAwaitData();
+    bool _savedAwaitStacks = false;
+
     static Profiler* const _instance;
 
   public:
@@ -186,6 +237,15 @@ class Profiler {
         return _instance;
     }
 
+    bool savedAwaitStacks() {
+      return _savedAwaitStacks;
+    }
+
+    long getAwaitDataAddress();
+    long setAwaitStackId(const long*, long, jmethodID);
+    long getAwaitSampledSignal();
+    long saveAwaitFrames(AwaitFrameType,long*,int);
+
     u64 total_samples() { return _total_samples; }
     time_t uptime()     { return time(NULL) - _start_time; }
 
@@ -207,6 +267,7 @@ class Profiler {
     u64 recordSample(void* ucontext, u64 counter, jint event_type, Event* event);
     void recordExternalSample(u64 counter, int tid, jint event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, jint event_type, Event* event, u32 call_trace_id);
+    u64 recordCustom(int offset, double value, const char* info, u64 tid_call_trace_id);
     void writeLog(LogLevel level, const char* message);
     void writeLog(LogLevel level, const char* message, size_t len);
 

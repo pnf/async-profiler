@@ -35,6 +35,67 @@ static void throwNew(JNIEnv* env, const char* exception_class, const char* messa
     }
 }
 
+extern "C" JNIEXPORT jlong JNICALL
+Java_one_profiler_AsyncProfiler_getMethodID(JNIEnv* env, jclass unused, jclass klass, jstring method, jstring sig, jboolean isStatic) {
+  const char* method_str = env->GetStringUTFChars(method, NULL);
+  const char* sig_str = env->GetStringUTFChars(sig, NULL);
+  jmethodID id = isStatic ? env->GetStaticMethodID(klass, method_str, sig_str) : env->GetMethodID(klass, method_str, sig_str);
+  env->ReleaseStringUTFChars(method, method_str);
+  env->ReleaseStringUTFChars(sig, sig_str);
+  return (jlong) id;
+}
+
+extern "C" JNIEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_saveString(JNIEnv* env, jclass unused, jstring name) {
+    const char* name_str = env->GetStringUTFChars(name, NULL);
+    int l = strlen(name_str);
+    char *p = new char[l+5];
+    snprintf(p, l+5, "%s_[a]",name_str);
+    env->ReleaseStringUTFChars(name, name_str);
+    return (long) p;
+}
+
+extern "C" JNIEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_setAwaitStackId(JNIEnv* env, jobject unused, jlongArray ida , jlong signal, jlong insertionId) {
+  long *ids = (long*) env->GetLongArrayElements(ida, 0);
+  long ret = Profiler::instance()->setAwaitStackId(ids, (long) signal, (jmethodID) insertionId);
+  env->ReleaseLongArrayElements(ida, ids, 0);
+  return ret;
+}
+
+extern "C" JNIEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_getAwaitDataAddress(JNIEnv* env, jobject unused) {
+    return Profiler::instance()->getAwaitDataAddress();
+}
+
+extern "C" JNIEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_getAwaitSampledSignal(JNIEnv* env, jobject unused, jlong id, jlong setWhenSampled) {
+  return Profiler::instance()->getAwaitSampledSignal();
+}
+
+extern "C" JNIEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_saveAwaitFrames(JNIEnv* env, jobject unused, int ft, jlongArray ids, jint nids) {
+  jlong *elems = (jlong*) env->GetPrimitiveArrayCritical(ids, 0);
+  long ret = Profiler::instance()->saveAwaitFrames(static_cast<AwaitFrameType>(ft), elems, nids);
+  env->ReleasePrimitiveArrayCritical(ids, (void*) elems, 0);
+  return ret;
+}
+
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_addCustomEventType(JNIEnv* env, jobject unused, jint i, jstring event, jstring value) {
+    const char* event_str = env->GetStringUTFChars(event, NULL);
+    const char* value_str = env->GetStringUTFChars(value, NULL);
+    JfrMetadata::addCustom(i, event_str, event_str, value_str);
+    env->ReleaseStringUTFChars(event, event_str);
+    env->ReleaseStringUTFChars(value, value_str);
+}
+
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_recordCustomEvent(JNIEnv* env, jobject unused, jint i, double v, jstring info) {
+    const char* info_str = info ? env->GetStringUTFChars(info, NULL) : NULL;
+    Profiler::instance()->recordCustom(i, v, info_str, 0);
+    if (info) env->ReleaseStringUTFChars(info, info_str);
+}
 
 extern "C" DLLEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_start0(JNIEnv* env, jobject unused, jstring event, jlong interval, jboolean reset) {
@@ -138,6 +199,14 @@ static const JNINativeMethod profiler_natives[] = {
     F(execute0,      "(Ljava/lang/String;)Ljava/lang/String;"),
     F(getSamples,    "()J"),
     F(filterThread0, "(Ljava/lang/Thread;Z)V"),
+    F(getMethodID,   "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)J"),
+    F(setAwaitStackId, "([JJJ)J"),
+    F(getAwaitDataAddress, "()J"),
+    F(getAwaitSampledSignal, "()J"),
+    F(saveAwaitFrames, "(I[JI)J"),
+    F(saveString,    "(Ljava/lang/String;)J"),
+    F(recordCustomEvent, "(IDLjava/lang/String;)V"),
+    F(addCustomEventType, "(ILjava/lang/String;Ljava/lang/String;)V")
 };
 
 static const JNINativeMethod* execute0 = &profiler_natives[2];

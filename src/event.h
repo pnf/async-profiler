@@ -59,4 +59,11 @@ class LiveObject : public Event {
     u64 _alloc_time;
 };
 
+class CustomEvent : public Event {
+  public:
+    int offset;
+    double value;
+    const char* info;
+};
+
 #endif // _EVENT_H
