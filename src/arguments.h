@@ -157,6 +157,8 @@ class Arguments {
     Counter _counter;
     Ring _ring;
     const char* _event;
+    bool _eventtypeframes;
+    bool _memoizeframes;
     int _timeout;
     long _interval;
     long _alloc;
@@ -206,6 +208,8 @@ class Arguments {
         _counter(COUNTER_SAMPLES),
         _ring(RING_ANY),
         _event(NULL),
+        _eventtypeframes(false),
+        _memoizeframes(false),
         _timeout(0),
         _interval(0),
         _alloc(-1),

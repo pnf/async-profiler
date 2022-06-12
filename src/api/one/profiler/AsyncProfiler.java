@@ -272,4 +272,43 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     private native String execute0(String command) throws IllegalArgumentException, IllegalStateException, IOException;
 
     private native void filterThread0(Thread thread, boolean enable);
+
+    /**
+     * Call to indicate an awaited method (e.g. body of future) is about to be invoked.
+     * @param id          - methodId indicating position of an await stack, typically the future's `run` method.
+     * @param signal      - value that will be returned by getAwaitSampledSignal iff sampling occurred
+     * @param insertionId - value with which to replace id so it can later be matched to an await stack
+     * @return            - previous value of id
+     */
+    public native long setAwaitStackId(long id[], long signal, long insertionId);
+
+    /**
+     * Return the address of the thread-local awaitData structure, cast to long, presumably for
+     * use with Unsafe.put/getLong.
+     */
+    public native long getAwaitDataAddress();
+
+    /**
+     * Called after return from method specified above to determine if sampling occurred.
+     * @return - signal value specified by setAwaitStack if sampling occurred, otherwise zero
+     */
+    public native long getAwaitSampledSignal();
+
+    /**
+     * Called if the return value of getSampledSignal matches the signal we set in setAwaitStackId to
+     * set the actual await stack that needs to be inserted.
+     * @param tp      - 1 if ids are jmethodIDs, 2 if they are char*
+     * @param ids     - await frames
+     * @param nids    - number of await frames
+     * @return
+     */
+    public native long saveAwaitFrames(int tp, long[] ids, int nids);
+
+    /** Convenience methods, in conjuction with above.  */
+    public native long getMethodID(Class cls, String method, String sig, boolean isStatic);
+    public native long saveString(String s);
+    public native void recordCustomEvent(int i, double v, long count, long infoString);
+    public native void addCustomEventType(int i, String eventName, String valueName);
+    static public native long testMalloc(long sz);
+    static public native void testFree(long addr);
 }

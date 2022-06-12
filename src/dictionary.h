@@ -54,6 +54,7 @@ class Dictionary {
 
     unsigned int lookup(const char* key);
     unsigned int lookup(const char* key, size_t length);
+    unsigned int lookup(const char* key, size_t length, unsigned int maskIfExists);
 
     void collect(std::map<unsigned int, const char*>& map);
 };

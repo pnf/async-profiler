@@ -28,6 +28,8 @@ public class FlameGraph implements Comparator<FlameGraph.Frame> {
     public static final byte FRAME_CPP = 4;
     public static final byte FRAME_KERNEL = 5;
     public static final byte FRAME_C1_COMPILED = 6;
+    public static final byte FRAME_AWAIT_S = 7;
+    public static final byte FRAME_AWAIT_J = 8;
 
     private final Arguments args;
     private final Map<String, Integer> cpool = new HashMap<>();

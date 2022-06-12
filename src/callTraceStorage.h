@@ -54,7 +54,7 @@ class CallTraceStorage {
     u64 _overflow;
 
     u64 calcHash(int num_frames, ASGCT_CallFrame* frames);
-    CallTrace* storeCallTrace(int num_frames, ASGCT_CallFrame* frames);
+    CallTrace* storeCallTrace(int num_frames, ASGCT_CallFrame* frames, u64 tagp);
     CallTrace* findCallTrace(LongHashTable* table, u64 hash);
 
   public:
@@ -68,7 +68,7 @@ class CallTraceStorage {
     void collectSamples(std::vector<CallTraceSample*>& samples);
     void collectSamples(std::map<u64, CallTraceSample>& map);
 
-    u32 put(int num_frames, ASGCT_CallFrame* frames, u64 counter);
+    u32 put(int num_frames, ASGCT_CallFrame* frames, u64 counter, u64* tag);
     void add(u32 call_trace_id, u64 counter);
 };
 

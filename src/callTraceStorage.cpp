@@ -192,14 +192,16 @@ u64 CallTraceStorage::calcHash(int num_frames, ASGCT_CallFrame* frames) {
     return h;
 }
 
-CallTrace* CallTraceStorage::storeCallTrace(int num_frames, ASGCT_CallFrame* frames) {
+CallTrace* CallTraceStorage::storeCallTrace(int num_frames, ASGCT_CallFrame* frames, u64 tag) {
     const size_t header_size = sizeof(CallTrace) - sizeof(ASGCT_CallFrame);
-    CallTrace* buf = (CallTrace*)_allocator.alloc(header_size + num_frames * sizeof(ASGCT_CallFrame));
+    int j = tag == 0 ? 0 : 1;
+    CallTrace* buf = (CallTrace*)_allocator.alloc(header_size + (num_frames+j) * sizeof(ASGCT_CallFrame));
     if (buf != NULL) {
-        buf->num_frames = num_frames;
+        buf->num_frames = num_frames + j;
+        if (j) buf->frames[0] = { BCI_STACK_TAG, (jmethodID) tag};
         // Do not use memcpy inside signal handler
         for (int i = 0; i < num_frames; i++) {
-            buf->frames[i] = frames[i];
+            buf->frames[i+j] = frames[i];
         }
     }
     return buf;
@@ -224,8 +226,10 @@ CallTrace* CallTraceStorage::findCallTrace(LongHashTable* table, u64 hash) {
     return table->values()[slot].trace;
 }
 
-u32 CallTraceStorage::put(int num_frames, ASGCT_CallFrame* frames, u64 counter) {
+u32 CallTraceStorage::put(int num_frames, ASGCT_CallFrame* frames, u64 counter, u64* tagp) {
     u64 hash = calcHash(num_frames, frames);
+
+    if (tagp && *tagp == 0) *tagp = hash;
 
     LongHashTable* table = _current_table;
     u64* keys = table->keys();
@@ -250,7 +254,7 @@ u32 CallTraceStorage::put(int num_frames, ASGCT_CallFrame* frames, u64 counter) 
             // Migrate from a previous table to save space
             CallTrace* trace = table->prev() == NULL ? NULL : findCallTrace(table->prev(), hash);
             if (trace == NULL) {
-                trace = storeCallTrace(num_frames, frames);
+                trace = storeCallTrace(num_frames, frames, tagp ? *tagp : 0);
             }
             table->values()[slot].setTrace(trace);
             break;

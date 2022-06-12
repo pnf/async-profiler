@@ -214,7 +214,17 @@ Error Arguments::parse(const char* args) {
                     _event = value;
                 }
 
-            CASE("timeout")
+           CASE("etypeframes")
+                 _eventtypeframes = true;
+
+           CASE("memoframes")
+                _memoizeframes = true;
+
+           CASE("globals")
+                Profiler::globalFlags = value == NULL ? GF_NONE : (GlobalFlags) atoi(value);
+                Log::info("Setting global flags to %d\n", Profiler::globalFlags);
+
+           CASE("timeout")
                 if (value == NULL || (_timeout = parseTimeout(value)) == -1) {
                     msg = "Invalid timeout";
                 }

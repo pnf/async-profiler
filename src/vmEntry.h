@@ -17,6 +17,8 @@ enum FrameTypeId {
     FRAME_CPP          = 4,
     FRAME_KERNEL       = 5,
     FRAME_C1_COMPILED  = 6,
+    FRAME_AWAIT_S      = 7,
+    FRAME_AWAIT_J      = 8,
 };
 
 class FrameType {
@@ -41,6 +43,13 @@ enum ASGCT_CallFrameType {
     BCI_PARK                = -15,  // class name of the park() blocker
     BCI_THREAD_ID           = -16,  // method_id designates a thread
     BCI_ERROR               = -17,  // method_id is an error string
+    BCI_AWAIT_S             = -30,  // method_id is frame name string
+    BCI_AWAIT_J             = -31,  // method_id is a real method, displayed as await frame
+    BCI_CUSTOM              = -32,  // A custom event
+
+    BCI_AWAIT_MARKER        = -40,  // Set at 0 to indicate await stack
+    BCI_AWAIT_INSERTION     = -41,  // An async stack should be inserted here
+    BCI_STACK_TAG           = -42
 };
 
 // See hotspot/src/share/vm/prims/forte.cpp

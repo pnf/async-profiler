@@ -15,12 +15,14 @@ enum EventType {
     PERF_SAMPLE,
     EXECUTION_SAMPLE,
     INSTRUMENTED_METHOD,
+    NATIVE_ALLOC,  // must be before alloc_sample due to inequality check in profiler.cpp
     ALLOC_SAMPLE,
     ALLOC_OUTSIDE_TLAB,
     LIVE_OBJECT,
     LOCK_SAMPLE,
     PARK_SAMPLE,
     PROFILING_WINDOW,
+    CUSTOM
 };
 
 class Event {
@@ -65,6 +67,13 @@ class ProfilingWindow : public Event {
   public:
     u64 _start_time;
     u64 _end_time;
+};
+
+class CustomEvent : public Event {
+  public:
+    int offset;
+    double value;
+    const char* info;
 };
 
 #endif // _EVENT_H

@@ -237,7 +237,7 @@ void FlameGraph::printTreeFrame(std::ostream& out, const Trie& f, int level, con
         StringUtils::replace(name, '>', "&gt;", 4);
 
         const char* div_class = trie->_children.empty() ? " class=\"o\"" : "";
-        
+
         if (_reverse) {
             snprintf(_buf, sizeof(_buf) - 1,
                      "<li><div%s>%.2f%% [%s]</div> <span class=\"t%d\">%s</span>\n",

@@ -311,7 +311,7 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 
     // Allow profiler server only at JVM startup
     if (_global_args._server != NULL) {
-        if (JavaAPI::startHttpServer(jvmti, jni, _global_args._server)) {
+       if (JavaAPI::startHttpServer(jvmti, jni, _global_args._server)) {
             Log::info("Profiler server started at %s", _global_args._server);
         } else {
             Log::error("Failed to start profiler server");
@@ -328,7 +328,10 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 }
 
 void JNICALL VM::VMDeath(jvmtiEnv* jvmti, JNIEnv* jni) {
-    Profiler::instance()->shutdown(_global_args);
+    if (Profiler::globalFlags & GF_NO_SHUTDOWN)
+        Log::info("VMDeath shutdown suppressed");
+    else
+       Profiler::instance()->shutdown(_global_args);
 }
 
 jvmtiError VM::RedefineClassesHook(jvmtiEnv* jvmti, jint class_count, const jvmtiClassDefinition* class_definitions) {

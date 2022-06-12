@@ -163,6 +163,10 @@ class Lookup {
             mi->_name = _symbols.lookup(name, len - 4);
             mi->_sig = _symbols.lookup("(Lk;)L;");
             mi->_type = FRAME_KERNEL;
+        } else if (len >= 4 && strcmp(name + len - 4, "_[a]") == 0) {
+            mi->_name = _symbols.lookup(name, len - 4);
+            mi->_sig = _symbols.lookup("()L");
+            mi->_type = FRAME_AWAIT_S;
         } else {
             mi->_name = _symbols.lookup(name);
             mi->_sig = _symbols.lookup("()L;");
@@ -250,10 +254,15 @@ class Lookup {
             } else if (frame.bci == BCI_NATIVE_FRAME) {
                 const char* name = (const char*)method;
                 fillNativeMethodInfo(mi, name, Profiler::instance()->getLibraryName(name));
+            } else if (frame.bci == BCI_AWAIT_S || frame.bci == BCI_CUSTOM) {
+                fillNativeMethodInfo(mi, (const char*)method, NULL);
+            } else if (frame.bci == BCI_AWAIT_INSERTION) {
+                fillNativeMethodInfo(mi, "unsavedawait", NULL);
             } else if (frame.bci == BCI_ERROR) {
                 fillNativeMethodInfo(mi, (const char*)method, NULL);
             } else {
                 fillJavaClassInfo(mi, (uintptr_t)method);
+                if (frame.bci == BCI_AWAIT_J) mi->_type = FRAME_AWAIT_J;
             }
         }
 
@@ -333,6 +342,16 @@ class Buffer {
     void put64(u64 v) {
         *(u64*)(_data + _offset) = OS::hton64(v);
         _offset += 8;
+    }
+
+    void putDouble(double v) {
+        union {
+            double d;
+            u64 j;
+        } u;
+
+        u.d = v;
+        put64(u.j);
     }
 
     void putFloat(float v) {
@@ -968,7 +987,7 @@ class Recording {
 
     void writeFrameTypes(Buffer* buf) {
         buf->putVar32(T_FRAME_TYPE);
-        buf->putVar32(7);
+        buf->putVar32(9);
         buf->putVar32(FRAME_INTERPRETED);  buf->putUtf8("Interpreted");
         buf->putVar32(FRAME_JIT_COMPILED); buf->putUtf8("JIT compiled");
         buf->putVar32(FRAME_INLINED);      buf->putUtf8("Inlined");
@@ -976,7 +995,9 @@ class Recording {
         buf->putVar32(FRAME_CPP);          buf->putUtf8("C++");
         buf->putVar32(FRAME_KERNEL);       buf->putUtf8("Kernel");
         buf->putVar32(FRAME_C1_COMPILED);  buf->putUtf8("C1 compiled");
-    }
+        buf->putVar32(FRAME_AWAIT_S);      buf->putUtf8("Await name");
+        buf->putVar32(FRAME_AWAIT_J);      buf->putUtf8("Await method");
+        }
 
     void writeThreadStates(Buffer* buf) {
         buf->putVar32(T_THREAD_STATE);
@@ -1035,33 +1056,70 @@ class Recording {
     void writeStackTraces(Buffer* buf, Lookup* lookup) {
         std::map<u32, CallTrace*> traces;
         Profiler::instance()->_call_trace_storage.collectTraces(traces);
+        std::map<jmethodID, CallTrace*> *awaitTraces = NULL;
+        int nAwaitStacks = 0;
+        if (Profiler::instance()->savedAwaitStacks()) {
+            awaitTraces = new std::map<jmethodID, CallTrace*>();
+            for (std::map<u32, CallTrace *>::const_iterator it = traces.begin(); it != traces.end(); ++it) {
+                CallTrace *trace = it->second;
+                if (trace->frames[0].bci == BCI_AWAIT_MARKER) {
+                    (*awaitTraces)[trace->frames[0].method_id] = trace;
+                    nAwaitStacks++;
+                }
+            }
+        }
 
         buf->putVar32(T_STACK_TRACE);
-        buf->putVar32(traces.size());
+        buf->putVar32(traces.size() - nAwaitStacks);
         for (std::map<u32, CallTrace*>::const_iterator it = traces.begin(); it != traces.end(); ++it) {
             CallTrace* trace = it->second;
+            if (trace->frames[0].bci == BCI_AWAIT_MARKER)  continue;
             buf->putVar32(it->first);
             buf->putVar32(0);  // truncated
-            buf->putVar32(trace->num_frames);
-            for (int i = 0; i < trace->num_frames; i++) {
-                MethodInfo* mi = lookup->resolveMethod(trace->frames[i]);
-                buf->putVar32(mi->_key);
-                if (mi->_type == FRAME_INTERPRETED) {
-                    jint bci = trace->frames[i].bci;
-                    FrameTypeId type = FrameType::decode(bci);
-                    bci = (bci & 0x10000) ? 0 : (bci & 0xffff);
-                    buf->putVar32(mi->getLineNumber(bci));
-                    buf->putVar32(bci);
-                    buf->put8(type);
-                } else {
-                    buf->put8(0);
-                    buf->put8(0);
-                    buf->put8(mi->_type);
-                }
-                flushIfNeeded(buf);
-            }
+
+            int n = awaitTraces ? countFrames(trace->frames, trace->num_frames, awaitTraces) : trace->num_frames;
+            buf->putVar32(n);
+
+            writeFrames(buf, trace->frames, trace->num_frames, awaitTraces, lookup);
             flushIfNeeded(buf);
         }
+        if(awaitTraces) delete awaitTraces;
+    }
+
+    int writeFrames(Buffer *buf, ASGCT_CallFrame *frames, int n, std::map<jmethodID, CallTrace *> *awaitTraces, Lookup *lookup) {
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            // Recursively insert await frames if they exist
+            jint bci = frames[i].bci;
+            if (awaitTraces && bci == BCI_AWAIT_INSERTION) {
+                CallTrace *atrace = NULL;
+                if ((atrace = (*awaitTraces)[frames[i].method_id]) != NULL)
+                    m += writeFrames(buf, atrace->frames + 1, atrace->num_frames - 1, awaitTraces, lookup);
+            } else if (bci > BCI_AWAIT_MARKER || bci < BCI_STACK_TAG) {  // not real events
+                m++;
+                if (buf != NULL) {
+                    MethodInfo *mi = lookup->resolveMethod(frames[i]);
+                    buf->putVar32(mi->_key);
+                    if (mi->_type < FRAME_NATIVE) {
+                        FrameTypeId type = FrameType::decode(bci);
+                        bci = (bci & 0x10000) ? 0 : (bci & 0xffff);
+                        buf->putVar32(mi->getLineNumber(bci));
+                        buf->putVar32(bci);
+                        buf->put8(type);
+                    } else {
+                        buf->put8(0);
+                        buf->put8(0);
+                        buf->put8(mi->_type);
+                    }
+                    flushIfNeeded(buf);
+                }
+            }
+        }
+        return m;
+    }
+
+    int countFrames(ASGCT_CallFrame* frames, int n, std::map<jmethodID, CallTrace*> *awaitTraces) {
+        return writeFrames(NULL, frames, n, awaitTraces, NULL);
     }
 
     void writeMethods(Buffer* buf, Lookup* lookup) {
@@ -1250,6 +1308,17 @@ class Recording {
         buf->putVar64(heap_start + heap_size);
         buf->putVar64(heap_size);
         buf->putVar64(total_memory - free_memory);
+        buf->put8(start, buf->offset() - start);
+    }
+
+    void recordCustomSample(Buffer *buf, int tid, u32 call_trace_id, CustomEvent* event) {
+        int start = buf->skip(1);
+        buf->put8(T_CUSTOM_BASE + event->offset);
+        buf->putVar64(TSC::ticks());
+        buf->putVar32(tid);
+        buf->putVar32(call_trace_id);
+        buf->putUtf8(event->info);
+        buf->putDouble(event->value);
         buf->put8(start, buf->offset() - start);
     }
 
@@ -1442,6 +1511,9 @@ void FlightRecorder::recordEvent(int lock_index, int tid, u32 call_trace_id,
                 break;
             case PROFILING_WINDOW:
                 _rec->recordWindow(buf, tid, (ProfilingWindow*)event);
+                break;
+            case CUSTOM:
+                _rec->recordCustomSample(buf, tid, call_trace_id, (CustomEvent*)event);
                 break;
         }
         _rec->flushIfNeeded(buf);
