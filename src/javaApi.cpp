@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <string.h>
+#include <math.h> // MS
 #include "asprof.h"
 #include "incbin.h"
 #include "javaApi.h"
@@ -23,6 +24,92 @@ static void throwNew(JNIEnv* env, const char* exception_class, const char* messa
     }
 }
 
+// MS methods follow:
+
+// Wrapper to expose jmethodID to java programs
+extern "C" DLLEXPORT jlong JNICALL
+Java_one_profiler_AsyncProfiler_getMethodID(JNIEnv* env, jclass unused, jclass klass, jstring method, jstring sig, jboolean isStatic) {
+  const char* method_str = env->GetStringUTFChars(method, NULL);
+  const char* sig_str = env->GetStringUTFChars(sig, NULL);
+  jmethodID id = isStatic ? env->GetStaticMethodID(klass, method_str, sig_str) : env->GetMethodID(klass, method_str, sig_str);
+  env->ReleaseStringUTFChars(method, method_str);
+  env->ReleaseStringUTFChars(sig, sig_str);
+  return (jlong) id;
+}
+
+// Permanently create a string in C memory.
+extern "C" DLLEXPORT jlong JNICALL
+Java_one_profiler_AsyncProfiler_saveString(JNIEnv* env, jobject unused, jstring name) {
+    const char* name_str = env->GetStringUTFChars(name, NULL);
+    char *p = strdup(name_str);
+    env->ReleaseStringUTFChars(name, name_str);
+    return (long) p;
+}
+
+extern "C"  DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_externalContext(JNIEnv* env, jobject unused, jlong ctx, jstring shmpath) {
+   const char *shmpath_str = shmpath ? env->GetStringUTFChars(shmpath, NULL) : NULL;
+   Profiler::instance()->setExternalContext((long) ctx, shmpath_str);
+   if(shmpath) env->ReleaseStringUTFChars(shmpath, shmpath_str);
+}
+
+extern "C" DLLEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_getAwaitDataAddress(JNIEnv* env, jobject unused) {
+    return Profiler::instance()->getAwaitDataAddress();
+}
+
+extern "C" DLLEXPORT long JNICALL
+Java_one_profiler_AsyncProfiler_saveAwaitFrames(JNIEnv* env, jobject unused, int ft, jlongArray ids, jint nids) {
+  jlong *elems = (jlong*) env->GetPrimitiveArrayCritical(ids, 0);
+  long ret = Profiler::instance()->saveAwaitFrames(static_cast<AwaitFrameType>(ft), elems, nids);
+  env->ReleasePrimitiveArrayCritical(ids, (void*) elems, 0);
+  return ret;
+}
+
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_addCustomEventType(JNIEnv* env, jobject unused, jint i, jstring event, jstring value) {
+    const char* event_str = env->GetStringUTFChars(event, NULL);
+    const char* value_str = env->GetStringUTFChars(value, NULL);
+    char* name  = new char[strlen(event_str) + strlen(value_str) + 2];
+    sprintf(name, "%s:%s", event_str, value_str);
+    Profiler::instance()->addCustomEventType(i, name);
+    JfrMetadata::addCustom(i, event_str, event_str, value_str);
+    env->ReleaseStringUTFChars(event, event_str);
+    env->ReleaseStringUTFChars(value, value_str);
+}
+
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_recordCustomEvent(JNIEnv* env, jobject unused, jint i, double v, jlong n, jlong info) {
+    u64 counter = n > 0 ? (u64) n : 0;
+    Profiler::instance()->recordCustom(i, v, (const char*) info, counter);
+}
+
+extern "C" DLLEXPORT jlong JNICALL
+Java_one_profiler_AsyncProfiler_testMalloc(JNIEnv* env, jclass unused, jlong sz) {
+    return (jlong) malloc((size_t) sz);
+}
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_testFree(JNIEnv* env, jclass unused, jlong addr) {
+   free((void*) addr);
+}
+
+// Used only to test that a stack containing this method is marked as unsafe.
+extern "C" DLLEXPORT jdouble JNICALL
+Java_one_profiler_AsyncProfiler_testIgnored(JNIEnv* env, jclass unused, jint count) {
+   double x = sin(count);
+   while(count-- > 0)
+       x = sin(x);
+   return x;
+}
+
+extern "C" DLLEXPORT jlongArray JNICALL
+Java_one_profiler_AsyncProfiler_getInternals(JNIEnv* env, jclass unused) {
+    const unsigned int SZ = 2;
+    long elements[SZ] = {(long) OS::getAllocated(), (long) Protect::timesProtected() };
+    jlongArray ret = env->NewLongArray(SZ);
+    env->SetLongArrayRegion(ret, 0, SZ, elements);
+    return ret;
+}
 
 extern "C" DLLEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_start0(JNIEnv* env, jobject unused, jstring event, jlong interval, jboolean reset) {
@@ -126,6 +213,17 @@ static const JNINativeMethod profiler_natives[] = {
     F(execute0,      "(Ljava/lang/String;)Ljava/lang/String;"),
     F(getSamples,    "()J"),
     F(filterThread0, "(Ljava/lang/Thread;Z)V"),
+    F(getMethodID,   "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)J"),
+    F(getAwaitDataAddress, "()J"),
+    F(saveAwaitFrames, "(I[JI)J"),
+    F(externalContext, "(JLjava/lang/String;)V"),
+    F(saveString,    "(Ljava/lang/String;)J"),
+    F(recordCustomEvent, "(IDJLL)V"),
+    F(addCustomEventType, "(ILjava/lang/String;Ljava/lang/String;)V"),
+    F(testMalloc, "(J)J"),
+    F(testFree, "(J)V"),
+    F(testIgnored, "(I)D"),
+    F(getInternals,"()[J")
 };
 
 static const JNINativeMethod* execute0 = &profiler_natives[2];

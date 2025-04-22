@@ -18,3 +18,7 @@ Error Engine::start(Arguments& args) {
 
 void Engine::stop() {
 }
+
+// MS: by default does nothing, since most methods have nothing to do with native memory
+void Engine::stop_jemalloc() {
+}

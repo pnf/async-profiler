@@ -42,6 +42,7 @@ enum Mark {
     MARK_INTERPRETER = 2,
     MARK_COMPILER_ENTRY = 3,
     MARK_ASYNC_PROFILER = 4, // async-profiler internals such as native hooks.
+    MARK_UNSAFE = 5  // MS - native methods in stack that might make java stack walking unsafe
 };
 
 

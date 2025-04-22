@@ -34,7 +34,8 @@ enum SHORT_ENUM Action {
     ACTION_STATUS,
     ACTION_MEMINFO,
     ACTION_LIST,
-    ACTION_VERSION
+    ACTION_VERSION,
+    ACTION_STOP_JEMALLOC  // MS
 };
 
 enum SHORT_ENUM Counter {
@@ -159,6 +160,11 @@ class Arguments {
     Action _action;
     Counter _counter;
     const char* _event;
+    bool _eventtypeframes;   // MS
+    bool _memoizeframes;     // MS
+    const char* _shmContext; // MS
+    bool _jemalloc; // MS
+    bool _persist; // MS
     int _timeout;
     long _interval;
     long _alloc;
@@ -168,6 +174,7 @@ class Arguments {
     int _jstackdepth;
     int _signal;
     const char* _file;
+    const char* _atomicfile; // MS
     const char* _log;
     const char* _loglevel;
     const char* _unknown_arg;
@@ -215,6 +222,11 @@ class Arguments {
         _action(ACTION_NONE),
         _counter(COUNTER_SAMPLES),
         _event(NULL),
+        _eventtypeframes(false),  // MS
+        _persist(false),          // MS
+        _memoizeframes(false),    // MS
+        _jemalloc(false),         // MS
+        _shmContext(NULL),        // MS
         _timeout(0),
         _interval(0),
         _alloc(-1),
@@ -224,6 +236,7 @@ class Arguments {
         _jstackdepth(DEFAULT_JSTACKDEPTH),
         _signal(0),
         _file(NULL),
+        _atomicfile(NULL),        // MS
         _log(NULL),
         _loglevel(NULL),
         _unknown_arg(NULL),

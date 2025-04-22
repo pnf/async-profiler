@@ -140,6 +140,9 @@ const char* FrameName::decodeNativeSymbol(const char* name) {
 }
 
 const char* FrameName::typeSuffix(FrameTypeId type) {
+  // MS: Want to identify await frames visually irrespective of style setting
+    if(type == FRAME_AWAIT_J || type == FRAME_AWAIT_S)
+        return "_[a]";
     if (_style & STYLE_ANNOTATE) {
         switch (type) {
             case FRAME_INTERPRETED:  return "_[0]";
@@ -152,7 +155,22 @@ const char* FrameName::typeSuffix(FrameTypeId type) {
     return NULL;
 }
 
+static bool (*checkIsValid)(void*) = NULL;  // MS
+static bool needToLoadIsValid = true; // MS
+
 void FrameName::javaMethodName(jmethodID method) {
+
+    // MS: Actually working workaround for JDK-8313816.  Call jvm validation method directly.
+    if (checkIsValid == NULL && needToLoadIsValid) {
+        needToLoadIsValid = false;
+        // Get pointer to private Method::is_valid_method(Method *method)
+        checkIsValid = (bool (*)(void *)) VMStructs::libjvm()->findSymbol("_ZN6Method15is_valid_methodEPKS_");
+    }
+    if (checkIsValid != NULL && !checkIsValid(*((void**) method))) {
+        _str.assign("__invalid_jmethodID");
+        return;
+    }
+
     if (VMStructs::hasMethodStructs()) {
         // Workaround for JDK-8313816
         VMMethod* vm_method = VMMethod::fromMethodID(method);
@@ -300,6 +318,22 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
 
         case BCI_ERROR:
             return _str.assign("[").append((const char*)frame.method_id).append("]").c_str();
+
+        case BCI_AWAIT_S: {  // MS
+            return (const char*) frame.method_id;
+        }
+
+        case BCI_AWAIT_INSERTION:  // MS
+        case BCI_AWAIT_MARKER: {  // MS
+            // These will normally be elided during recursive stack expansion
+            return "[await_marker]";
+        }
+
+        case BCI_CUSTOM:  // MS
+            return _str.assign("[custom=").append((const char*)frame.method_id).append("]").c_str();
+
+        case BCI_STACK_TAG: // MS
+            return _str.assign("[sid=").append(std::to_string((u64) frame.method_id)).append("]").c_str();
 
         default: {
             const char* type_suffix = typeSuffix(FrameType::decode(frame.bci));

@@ -272,4 +272,33 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     private native String execute0(String command) throws IllegalArgumentException, IllegalStateException, IOException;
 
     private native void filterThread0(Thread thread, boolean enable);
+
+    /* MS methods */
+
+    /**
+     * Return the address of the thread-local awaitData structure, cast to long, presumably for
+     * use with Unsafe.put/getLong.
+     */
+    public native long getAwaitDataAddress();
+
+
+    /**
+     * @param tp      - 1 if ids are jmethodIDs, 2 if they are char*
+     * @param ids     - await frames
+     * @param nids    - number of await frames
+     * @return
+     */
+    public native long saveAwaitFrames(int tp, long[] ids, int nids);
+
+    public native void externalContext(long ctx, String shmpath);
+
+    /** Convenience methods, in conjuction with above.  */
+    public native long getMethodID(Class cls, String method, String sig, boolean isStatic);
+    public native long saveString(String s);
+    public native void recordCustomEvent(int i, double v, long count, long infoString);
+    public native void addCustomEventType(int i, String eventName, String valueName);
+    static public native long testMalloc(long sz);
+    static public native void testFree(long addr);
+    static public native double testIgnored(int count);
+    public native long[] getInternals();
 }

@@ -11,6 +11,7 @@
 #include "stackWalker.h"
 #include "tsc.h"
 #include "vmStructs.h"
+#include "protect.h"  // MS
 
 
 void** CpuEngine::_pthread_entry = NULL;
@@ -21,9 +22,15 @@ CStack CpuEngine::_cstack;
 int CpuEngine::_signal;
 bool CpuEngine::_count_overrun;
 
+// MS: track impact of protected operations
+volatile int Protect::_protectedOperations = 0;
+volatile int Protect::_timesProtected = 0;
+
 // Intercept thread creation/termination by patching libjvm's GOT entry for pthread_setspecific().
 // HotSpot puts VMThread into TLS on thread start, and resets on thread end.
 static int pthread_setspecific_hook(pthread_key_t key, const void* value) {
+    Protect p;  // MS: protect from sampling during setspecific, as we saw occasional hanging.
+
     if (key != VMThread::key()) {
         return pthread_setspecific(key, value);
     }
@@ -42,6 +49,9 @@ static int pthread_setspecific_hook(pthread_key_t key, const void* value) {
 }
 
 void CpuEngine::onThreadStart() {
+    // MS: Force call to jni_GetEnv so that __tls_get_addr is called now rather than later. Not clear that this helps.
+    VM::jni();
+
     CpuEngine* current = __atomic_load_n(&_current, __ATOMIC_ACQUIRE);
     if (current != NULL) {
         current->createForThread(OS::threadId());
@@ -55,6 +65,20 @@ void CpuEngine::onThreadEnd() {
     }
 }
 
+// MS: Allow marking specific native methods as unsafe and therefore preventing java stack walking when present.
+static bool isUnsafe(const char* name) {
+    return (strcmp(name, "update_get_addr") == 0) ||
+            (strcmp(name, "je_arena_realloc") == 0) ||
+            (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
+}
+static void markUnsafeFunctions() {
+    CodeCacheArray* native_libs = Profiler::instance()->nativeLibs();
+    const int native_lib_count = native_libs->count();
+    for (int i=0; i < native_lib_count; i++) {
+        (*native_libs)[i]->mark(isUnsafe, MARK_UNSAFE);
+    }
+}
+
 bool CpuEngine::setupThreadHook() {
     if (_pthread_entry != NULL) {
         return true;
@@ -65,6 +89,8 @@ bool CpuEngine::setupThreadHook() {
         _pthread_entry = &dummy_pthread_entry;
         return true;
     }
+
+    markUnsafeFunctions(); // MS
 
     // Depending on Zing version, pthread_setspecific is called either from libazsys.so or from libjvm.so
     if (VM::isZing()) {
