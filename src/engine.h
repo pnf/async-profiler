@@ -48,6 +48,7 @@ class Engine {
 
     virtual Error check(Arguments& args);
     virtual Error start(Arguments& args);
+    virtual void stop_jemalloc(); // MS
     virtual void stop();
 
     void enableEvents(bool enabled) {

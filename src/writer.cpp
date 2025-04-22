@@ -22,6 +22,12 @@ Writer& Writer::operator<<(const char* s) {
     return *this;
 }
 
+Writer& Writer::operator<<(unsigned int n) {
+    char buf[16];
+    write(buf, snprintf(buf, sizeof(buf), "%u", n));
+    return *this;
+}
+
 Writer& Writer::operator<<(int n) {
     char buf[16];
     write(buf, snprintf(buf, sizeof(buf), "%d", n));
@@ -74,6 +80,34 @@ void FileWriter::write(const char* data, size_t len) {
     }
     memcpy(_buf + _size, data, len);
     _size += len;
+}
+
+// MS:
+AtomicOutputFile::AtomicOutputFile(Arguments &args)  : _fname(args.file()), _tmpname(NULL) {
+    if (args._atomicfile) {
+        _tmpname = (char*) calloc(strlen(_fname) + strlen(args._atomicfile) + 10, sizeof(char*));
+        sprintf(_tmpname, "%s-%sXXXXXX",_fname, args._atomicfile);
+        mkstemp(_tmpname);
+        Log::info("Opening temporary %s", _tmpname);
+    }
+    _fileWriter = new FileWriter(_tmpname ? _tmpname : _fname);
+}
+
+AtomicOutputFile::~AtomicOutputFile() {
+    if (_fileWriter) {
+        delete _fileWriter;
+        _fileWriter = NULL;
+        if (_tmpname) {
+            Log::info("Moving %s to %s", _tmpname, _fname);
+            rename(_tmpname, _fname);  // atomic
+            free(_tmpname);
+            _tmpname = NULL;
+        }
+    }
+}
+
+void AtomicOutputFile::write(const char *data, size_t len) {
+    _fileWriter->write(data, len);
 }
 
 BufferWriter::BufferWriter(size_t capacity) : _size(0), _capacity(capacity) {

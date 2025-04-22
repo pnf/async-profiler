@@ -52,6 +52,7 @@ public class JfrReader implements Closeable {
 
     public final Dictionary<JfrClass> types = new Dictionary<>();
     public final Map<String, JfrClass> typesByName = new HashMap<>();
+    public final Map<Integer, String> customTypesById = new HashMap<>();
     public final Dictionary<String> threads = new Dictionary<>();
     public final Dictionary<ClassRef> classes = new Dictionary<>();
     public final Dictionary<String> strings = new Dictionary<>();
@@ -116,6 +117,11 @@ public class JfrReader implements Closeable {
 
     public long durationNanos() {
         return endNanos - startNanos;
+    }
+
+    // MS: used in speedscope format file generation
+    public long nanosToTicks(long nanos) {
+        return (long) ((nanos - startNanos) * (ticksPerSec / 1e9)) + startTicks;
     }
 
     public <E extends Event> void registerEvent(String name, Class<E> eventClass) {
@@ -186,6 +192,8 @@ public class JfrReader implements Closeable {
                 if (cls == null || cls == ContendedLock.class) return (E) readContendedLock(false);
             } else if (type == threadPark) {
                 if (cls == null || cls == ContendedLock.class) return (E) readContendedLock(true);
+            } else if(customTypesById.containsKey(type)) {
+                if (cls == null || cls == CustomSample.class) return (E) readCustomSample(type);
             } else if (type == activeSetting) {
                 readActiveSetting();
             } else {
@@ -215,6 +223,15 @@ public class JfrReader implements Closeable {
         int threadState = getVarint();
         int samples = hasSamples ? getVarint() : 1;
         return new ExecutionSample(time, tid, stackTraceId, threadState, samples);
+    }
+
+    private CustomSample readCustomSample(int id) {
+        long time = getVarlong();
+        int tid = getVarint();
+        int stackTraceId = getVarint();
+        String info = getString();
+        double value = getDouble();
+        return new CustomSample(time, tid, stackTraceId, id, info, value);
     }
 
     private AllocationSample readAllocationSample(boolean tlab) {
@@ -305,6 +322,7 @@ public class JfrReader implements Closeable {
 
         types.clear();
         typesByName.clear();
+        customTypesById.clear();
 
         readMeta(chunkStart + metaOffset);
         readConstantPool(chunkStart + cpOffset);
@@ -356,6 +374,9 @@ public class JfrReader implements Closeable {
                 JfrClass type = new JfrClass(attributes);
                 if (!attributes.containsKey("superType")) {
                     types.put(type.id, type);
+                }
+                if (type.name.startsWith("ap.custom.")) {
+                    customTypesById.put(type.id, type.name);
                 }
                 typesByName.put(type.name, type);
                 return type;

@@ -433,6 +433,45 @@ Error Arguments::parse(const char* args) {
             CASE("inverted")
                 _inverted = true;
 
+            // MS custom commands
+
+            // Add event-type frames like "[custom=Alloc]" so we can publish multiple event types without jfr.
+            CASE("etypeframes")
+                _eventtypeframes = true;
+            // Live allocation tracking persists across resets
+            CASE("persist")
+                _persist = true;
+            // When publishing folded stacks, first occurrence of the frame foo is published as
+            // 123=foo, and subsequently as 123
+            CASE("memoframes")
+                _memoizeframes = true;
+            // Sample native memory allocation using jemalloc hooks
+            CASE("jemalloc")
+                _jemalloc = true;
+            // set shared memory context file name
+            CASE("shmcontext")
+                if(value == NULL || value[0] == 0)
+                    msg = "Shared memory context may not be empty";
+                else
+                    Profiler::instance()->setExternalContext(0, value);
+            // Set permanent/global flag bitmap
+            CASE("globals")
+                Profiler::globalFlags = value == NULL ? GF_NONE : (GlobalFlags) atoi(value);
+                Log::info("Setting global flags to %d\n", Profiler::globalFlags);
+            // Dump output will be written to a temp file and then moved atomically to final destination
+            CASE("atomicfile")
+                if (value == NULL || value[0] == 0)
+                    msg = "atomicfile suffix must not be empty";
+                else
+                   _atomicfile = value;
+
+            // Permanently turn off jemalloc sampling, including frees.
+            CASE("stop_native")  // keep old command around for a release or two
+                _action = ACTION_STOP_JEMALLOC;
+
+            CASE("stopjemalloc")
+                _action = ACTION_STOP_JEMALLOC;
+
             DEFAULT()
                 if (_unknown_arg == NULL) _unknown_arg = arg;
         }

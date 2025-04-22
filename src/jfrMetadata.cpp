@@ -282,6 +282,7 @@ JfrMetadata::JfrMetadata() : Element("root") {
 
         << element("region").attribute("locale", "en_US").attribute("gmtOffset", "0");
 
-    // The map is used only during construction
-    _string_map.clear();
+    // MS:
+    // The map is used only during construction, but we need to keep it around for custom attributes.
+    // _string_map.clear();
 }

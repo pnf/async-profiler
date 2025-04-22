@@ -418,7 +418,10 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 }
 
 void JNICALL VM::VMDeath(jvmtiEnv* jvmti, JNIEnv* jni) {
-    Profiler::instance()->shutdown(_global_args);
+    if (Profiler::globalFlags & GF_NO_SHUTDOWN)
+        Log::debug("VMDeath shutdown suppressed");
+    else
+       Profiler::instance()->shutdown(_global_args);
 }
 
 jvmtiError VM::RedefineClassesHook(jvmtiEnv* jvmti, jint class_count, const jvmtiClassDefinition* class_definitions) {

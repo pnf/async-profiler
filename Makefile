@@ -9,9 +9,11 @@ endif
 PACKAGE_NAME=async-profiler-$(PROFILER_VERSION)-$(OS_TAG)-$(ARCH_TAG)
 PACKAGE_DIR=/tmp/$(PACKAGE_NAME)
 
+LIB?=lib
+OPT?=-O3
+
 ASPROF=bin/asprof
-JFRCONV=bin/jfrconv
-LIB_PROFILER=lib/libasyncProfiler.$(SOEXT)
+LIB_PROFILER=$(LIB)/libasyncProfiler.$(SOEXT)
 API_JAR=jar/async-profiler.jar
 CONVERTER_JAR=jar/jfr-converter.jar
 TEST_JAR=test.jar
@@ -28,8 +30,8 @@ endif
 
 CFLAGS_EXTRA ?=
 CXXFLAGS_EXTRA ?=
-CFLAGS=-O3 -fno-exceptions $(CFLAGS_EXTRA)
-CXXFLAGS=-O3 -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden -std=c++11 $(CXXFLAGS_EXTRA)
+CFLAGS=$(OPT) -fno-exceptions $(CFLAGS_EXTRA)
+CXXFLAGS=$(OPT) -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden
 CPPFLAGS=
 DEFS=-DPROFILER_VERSION=\"$(PROFILER_VERSION)\"
 INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper
@@ -47,14 +49,15 @@ TEST_LIB_DIR=build/test/lib
 TEST_BIN_DIR=build/test/bin
 LOG_DIR=build/test/logs
 LOG_LEVEL=
-SKIP=
+SKIP?=
 TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip=$(SKIP)
 
 # always sort SOURCES so zInit is last.
 SOURCES := $(sort $(wildcard src/*.cpp))
 HEADERS := $(wildcard src/*.h)
 RESOURCES := $(wildcard src/res/*)
-JAVA_HELPER_CLASSES := $(wildcard src/helper/one/profiler/*.class)
+JAVA_HELPER_SOURCE := $(wildcard src/helper/one/profiler/*.java)
+JAVA_HELPER_CLASSES := $(JAVA_HELPER_SOURCE:.java=.class)
 API_SOURCES := $(wildcard src/api/one/profiler/*.java)
 CONVERTER_SOURCES := $(shell find src/converter -name '*.java')
 TEST_SOURCES := $(shell find test -name '*.java')
@@ -126,7 +129,14 @@ endif
 
 .PHONY: all jar release build-test test clean coverage clean-coverage build-test-java build-test-cpp build-test-libs build-test-bins test-cpp test-java check-md format-md
 
-all: build/bin build/lib build/$(LIB_PROFILER) build/$(ASPROF) jar build/$(JFRCONV)
+all: build/bin build/$(LIB) build/$(LIB_PROFILER) build/$(ASPROF) jar build/$(JFRCONV)
+
+library: build/$(LIB) build/$(LIB_PROFILER)
+
+debug: FORCE
+	LIB=lib-g OPT=-g make library
+
+FORCE:
 
 jar: build/jar build/$(API_JAR) build/$(CONVERTER_JAR)
 
@@ -148,9 +158,9 @@ endif
 
 $(PACKAGE_DIR): all LICENSE README.md
 	mkdir -p $(PACKAGE_DIR)
-	cp -RP build/bin build/lib LICENSE README.md $(PACKAGE_DIR)/
+	cp -RP build/bin build/$(LIB) LICENSE README.md $(PACKAGE_DIR)/
 	chmod -R 755 $(PACKAGE_DIR)
-	chmod 644 $(PACKAGE_DIR)/lib/* $(PACKAGE_DIR)/LICENSE $(PACKAGE_DIR)/README.md
+	chmod 644 $(PACKAGE_DIR)/$(LIB)/* $(PACKAGE_DIR)/LICENSE $(PACKAGE_DIR)/README.md
 
 build/%:
 	mkdir -p $@
@@ -230,7 +240,7 @@ test-cpp: build-test-cpp
 
 test-java: build-test-java
 	echo "Running tests against $(LIB_PROFILER)"
-	$(JAVA) "-Djava.library.path=$(TEST_LIB_DIR)" $(TEST_FLAGS) -ea -cp "build/test.jar:build/jar/*:build/lib/*" one.profiler.test.Runner $(TESTS)
+	$(JAVA) "-Djava.library.path=$(TEST_LIB_DIR)" $(TEST_FLAGS) -ea -cp "build/test.jar:build/jar/*:build/$(LIB)/*" one.profiler.test.Runner $(TESTS)
 
 coverage: override FAT_BINARY=false
 coverage: clean-coverage
@@ -257,3 +267,4 @@ clean-coverage:
 
 clean:
 	$(RM) -r build
+	find . -name '*.class' -delete

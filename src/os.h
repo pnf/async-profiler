@@ -62,7 +62,12 @@ class JitWriteProtection {
 
 
 class OS {
+    volatile static u64 allocated;  // MS: track internal memory use
+    volatile static u64 freed;      // MS: track internal memory use
+
   public:
+    static long getAllocated();     // MS: track internal memory use
+
     static const size_t page_size;
     static const size_t page_mask;
 

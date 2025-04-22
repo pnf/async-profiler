@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <fstream>  // MS: for atomic output file
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -36,8 +37,13 @@
 #include "tsc.h"
 #include "vmStructs.h"
 
+// MS: thread-local storage for await data.
+static pthread_key_t local_await_data_key;
+static void __attribute__((constructor)) createAwaitDataKey(void) {
+    pthread_key_create(&local_await_data_key, NULL);
+}
 
-// The instance is not deleted on purpose, since profiler structures
+// The instance is deliberately not deleted, since profiler structures
 // can be still accessed concurrently during VM termination
 Profiler* const Profiler::_instance = new Profiler();
 
@@ -116,6 +122,210 @@ static inline int makeFrame(ASGCT_CallFrame* frames, jint type, const char* id) 
     return makeFrame(frames, type, (jmethodID)id);
 }
 
+// MS: Recursive stack trace building
+FrameIterator::FrameIterator(std::vector<CallTraceSample*> &samples, bool savedAwaitStacks) : awaitTraces() {
+    if (savedAwaitStacks)
+        for(std::vector<CallTraceSample*>::const_iterator it = samples.begin(); it != samples.end(); ++it){
+            auto trace = (*it)->acquireTrace();
+            if (trace)
+                addAwaitTrace(trace);
+        }
+}
+
+FrameIterator::FrameIterator(std::vector<CallTraceSample> &samples, bool savedAwaitStacks) : awaitTraces() {
+    if (savedAwaitStacks)
+        for(std::vector<CallTraceSample>::const_iterator it = samples.begin(); it != samples.end(); ++it){
+            auto trace = ((CallTraceSample*) &(*it))->acquireTrace();
+            if (trace)
+                addAwaitTrace(trace);
+        }
+}
+
+FrameIterator::FrameIterator(std::map<long long unsigned int, CallTraceSample> &samples, bool savedAwaitStacks) : awaitTraces() {
+    if(savedAwaitStacks)
+        for (std::map<u64, CallTraceSample>::const_iterator it = samples.begin(); it != samples.end(); ++it)
+            addAwaitTrace(it->second.trace);
+}
+
+void FrameIterator::set(CallTrace* trace_, bool reversed, int ignore_last) {
+    traceStack[0] = trace_;
+    depth = 0;
+    i = reversed ? trace_->num_frames - 1 - ignore_last: 0;
+}
+
+int FrameIterator::setAndCount(CallTrace* trace_, bool reversed, int ignore_last) {
+    traceStack[0] = trace_;
+    int n = i = depth = 0;
+    if(!hasAwaits) n = trace_->num_frames;
+    else { while(next() != NULL) n++; depth = 0; }
+    i = reversed ? trace_->num_frames - 1 - ignore_last: 0;
+    return n;
+}
+
+ASGCT_CallFrame* FrameIterator::prev() {
+    if(!hasAwaits) return i>= 0 ? traceStack[0]->frames + i-- : NULL;
+    if(i >= 0) {
+        if (traceStack[depth]->frames[i].bci == BCI_AWAIT_INSERTION) {
+            CallTrace *atrace = awaitTraces[traceStack[depth]->frames[i--].method_id];
+            if (atrace == NULL || depth >= MAX_DEPTH -1) return prev();
+            positionStack[depth] = i;
+            i = atrace->num_frames - 1;
+            traceStack[++depth] = atrace;
+            return prev();
+        } else if(traceStack[depth]->frames[i].bci == BCI_AWAIT_MARKER) {
+            i--; return prev();
+        } else
+            return traceStack[depth]->frames + i--;
+    } else if(depth > 0) {
+      depth--;
+      i = positionStack[depth];
+      return prev();
+    }
+    else return NULL;
+}
+
+ASGCT_CallFrame* FrameIterator::next() {
+    if(!hasAwaits) return i < traceStack[0]->num_frames ? traceStack[0]->frames + i++ : NULL;
+    if(i < traceStack[depth]->num_frames) {
+      if(traceStack[depth]->frames[i].bci == BCI_AWAIT_INSERTION) {
+        CallTrace *atrace = awaitTraces[traceStack[depth]->frames[i++].method_id];
+        if(atrace == NULL || depth >= MAX_DEPTH -1) return next();
+        positionStack[depth] = i;
+        i = 0;
+        traceStack[++depth] = atrace;
+        return next();
+      } else if(traceStack[depth]->frames[i].bci == BCI_AWAIT_MARKER) {
+          i++; return next();
+      } else
+         return traceStack[depth]->frames + i++;
+    }
+    else if(depth > 0) {
+      depth--;
+      i = positionStack[depth];
+      return next();
+    }
+    else return NULL;
+}
+
+// MS
+AwaitData* Profiler::awaitData() {
+    return (AwaitData*) pthread_getspecific(local_await_data_key);
+}
+
+// MS: shared memory context
+volatile static long *externalContext = NULL;
+void Profiler::setExternalContext(long ctx, const char *shmpath) {
+    if (shmpath) {
+        if (ctx) {
+            // Setting a context value for the child process to read.  There will be a different shm path for each child.
+            std::string sp(shmpath);
+            MutexLocker locker(_contexts_lock);
+            // Get pointer to shared memory
+            long *childContext = _contexts[sp];
+            if (!childContext) {
+                // Not mapped yet.
+                int fd = shm_open(shmpath, O_CREAT | O_RDWR, 0600);
+                if (fd < 0) {
+                    auto err = errno;
+                    Log::error("shm_open failed for %s %d", shmpath, err);
+                    return;
+                }
+                // can return non-zero even when it succeeded;  if a real error, then mmap will fail
+                ftruncate(fd, sizeof(long));
+                childContext = (long *) mmap(NULL, sizeof(long), PROT_READ | PROT_WRITE,
+                                             MAP_SHARED, fd, 0);  // returns -1 on failure
+                if (childContext && (long) childContext != -1)
+                    _contexts[sp] = childContext;
+                else {
+                    childContext = NULL;
+                    auto err = errno;
+                    Log::error("mmap failed for %s %d", shmpath, err);
+                }
+                close(fd);
+            }
+            // Set the context.
+            if (childContext && ((long) childContext) != -1)
+                *childContext = ctx;
+        } else {
+            // Get a pointer to the shared memory that will be written by our one and only parent.
+            int fd = shm_open(shmpath, O_RDONLY, 0400);
+            if (fd < 0) {
+                auto err = errno;
+                Log::error("shm_open failed for %s %d", shmpath, err);
+                return;
+            }
+            externalContext = (long*) mmap(NULL, sizeof(externalContext), PROT_READ,
+                 MAP_SHARED, fd, 0);
+            if (externalContext && ((long) externalContext) != -1)
+                Log::info("Shared context set %d %x %ld", fd, externalContext, externalContext ? *externalContext : 0);
+            else {
+                auto err = errno;
+                Log::error("mmap failed for %s %d", shmpath, err);
+                externalContext = NULL;
+            }
+            close(fd);
+        }
+    }
+}
+
+// MS
+AwaitData* Profiler::maybeInitAwaitData() {
+    AwaitData* ad = awaitData();
+    if(ad == NULL) {
+        lockAll();
+        ad = (AwaitData *) calloc(1, sizeof(AwaitData));
+        pthread_setspecific(local_await_data_key, (void *) ad);
+        unlockAll();
+    }
+    return ad;
+}
+
+long Profiler::getAwaitDataAddress() {
+    return (long) maybeInitAwaitData();
+}
+
+// MS
+long Profiler::saveAwaitFrames(AwaitFrameType ft, long *elems, int n) {
+    if(n == 0) return 0;
+    int tid = OS::threadId();
+    u32 lock_index = getLockIndex(tid);
+    if (!_locks[lock_index].tryLock() &&
+        !_locks[lock_index = (lock_index + 1) % CONCURRENCY_LEVEL].tryLock() &&
+        !_locks[lock_index = (lock_index + 2) % CONCURRENCY_LEVEL].tryLock())
+    {
+      return 0;
+    }
+    ASGCT_CallFrame* frames = _calltrace_buffer[lock_index]->_asgct_frames;
+    if (frames == NULL) {
+       _locks[lock_index].unlock();
+       return 0;
+    }
+    if(n > _max_stack_depth)
+        n = _max_stack_depth;
+    switch(ft) {
+        case AW_METHOD:  // frames will be jmethodIDs
+            for(int i=1; i<n; i++) {
+                frames[i].bci = FrameType::encode(FRAME_AWAIT_J, frames[i].bci);
+                frames[i].method_id = (jmethodID) elems[i];
+            }
+            break;
+        case AW_STRING:  // frames are just strings
+            for(int i=1; i<n; i++) {
+                frames[i].bci = BCI_AWAIT_S;
+                frames[i].method_id = (jmethodID) elems[i];
+            }
+            break;
+        default:
+            _locks[lock_index].unlock();
+            return -1;
+    }
+    _savedAwaitStacks = true;
+    frames[0].method_id = (jmethodID) elems[0];
+    frames[0].bci = BCI_AWAIT_MARKER;
+    u32 ret = _call_trace_storage.put(n, frames, 1, 0);
+    _locks[lock_index].unlock();
+    return ret;
+}
 
 // Avoid syscall when possible
 static inline int fastThreadId() {
@@ -189,6 +399,8 @@ const char* Profiler::asgctError(int code) {
             return "safepoint";
         case ticks_skipped:
             return "skipped";
+        case java_skipped:  // MS
+            return "java_skipped";
         case ticks_unknown_state:
             // Zing sometimes returns it
             return "unknown_state";
@@ -326,7 +538,8 @@ jmethodID Profiler::getCurrentCompileTask() {
     return NULL;
 }
 
-int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx) {
+int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx,
+                             const char** unsafe) { // MS
     const void* callchain[MAX_NATIVE_FRAMES];
     int native_frames;
 
@@ -341,10 +554,12 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
         native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     }
 
-    return convertNativeTrace(native_frames, callchain, frames, event_type);
+    return convertNativeTrace(native_frames, callchain, frames, event_type,
+                              unsafe); // MS
 }
 
-int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type) {
+int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type,
+                                 const char** unsafe) { // MS
     int depth = 0;
     jmethodID prev_method = NULL;
 
@@ -359,6 +574,8 @@ int Profiler::convertNativeTrace(int native_frames, const void** callchain, ASGC
             } else if (mark == MARK_ASYNC_PROFILER && event_type == MALLOC_SAMPLE) {
                 // Skip all internal frames above the *_hook functions. Include the hook function itself.
                 depth = 0;
+            } else if (unsafe != NULL && mark == MARK_UNSAFE) {  // MS
+                *unsafe = current_method_name;
             } else if (mark == MARK_INTERPRETER) {
                 // This is C++ interpreter frame, this and later frames should be reported
                 // as Java frames returned by AGCT. Terminate the scan here.
@@ -612,23 +829,61 @@ void Profiler::fillFrameTypes(ASGCT_CallFrame* frames, int num_frames, NMethod* 
     }
 }
 
-u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Event* event) {
+// MS: Record a custom event from arbitrary C code
+extern "C"
+u64 async_profiler_record_custom(int offset, double value, u64 counter) {
+    return Profiler::instance()->recordCustom(offset, value, NULL, counter);
+}
+
+// MS
+static const char** customEventNames = new const char*[100];
+void Profiler::addCustomEventType(int offset, const char *name) {
+    MutexLocker ml(_state_lock);
+    customEventNames[offset] = name;
+}
+
+// MS
+u64 Profiler::recordCustom(int offset, double value, const char* info, u64 counter) {
+    {
+        MutexLocker ml(_state_lock);
+        if (_state != RUNNING) return 0;
+    }
+    CustomEvent e;
+    e.offset = offset;
+    e.value = value;
+    e.info = info ? info : customEventNames[offset];
+    return recordSample(NULL, counter, CUSTOM, &e);
+}
+
+// MS: Abort a sample, unlocking if necessary and recording failure.
+int Profiler::bail(int tid, EventType event_type, int lock_index) {
+    atomicInc(_failures[-ticks_skipped]);
+
+    if (event_type == PERF_SAMPLE) {
+        // Need to reset PerfEvents ring buffer, even though we discard the collected trace
+        PerfEvents::resetBuffer(tid);
+    }
+
+    if (lock_index >= 0)
+        _locks[lock_index].unlock();
+
+    return 0;
+}
+
+u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp) {
+    int tid = fastThreadId();
+    if (Protect::protectedOperation())
+        return bail(tid, event_type, -1);
+
     atomicInc(_total_samples);
 
-    int tid = fastThreadId();
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
         !_locks[lock_index = (lock_index + 1) % CONCURRENCY_LEVEL].tryLock() &&
         !_locks[lock_index = (lock_index + 2) % CONCURRENCY_LEVEL].tryLock())
     {
         // Too many concurrent signals already
-        atomicInc(_failures[-ticks_skipped]);
-
-        if (event_type == PERF_SAMPLE) {
-            // Need to reset PerfEvents ring buffer, even though we discard the collected trace
-            PerfEvents::resetBuffer(tid);
-        }
-        return 0;
+        return bail(tid, event_type, -1);
     }
 
     u64 stack_walk_begin = _features.stats ? OS::nanotime() : 0;
@@ -647,45 +902,58 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     }
 
     StackContext java_ctx = {0};
+    const char* unsafe_frame = NULL;  // MS
     if (hasNativeStack(event_type)) {
         if (_features.pc_addr && event_type <= WALL_CLOCK_SAMPLE) {
             num_frames += makeFrame(frames + num_frames, BCI_ADDRESS, StackFrame(ucontext).pc());
         }
         if (_cstack != CSTACK_NO) {
-            num_frames += getNativeTrace(ucontext, frames + num_frames, event_type, tid, &java_ctx);
+            num_frames += getNativeTrace(ucontext, frames + num_frames, event_type, tid, &java_ctx, &unsafe_frame);
         }
     }
 
-    if (_cstack == CSTACK_VMX) {
-        num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT);
-    } else if (event_type <= WALL_CLOCK_SAMPLE) {
-        // Async events
-        if (_cstack == CSTACK_VM) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
-        } else {
-            int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
-            if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
-                NMethod* nmethod = CodeHeap::findNMethod(java_ctx.pc);
-                if (nmethod != NULL) {
-                    fillFrameTypes(frames + num_frames, java_frames, nmethod);
+    // If an unsafe frame was detected in native stack, skip java stack.
+    if (unsafe_frame) {
+        long n = atomicInc(_failures[-java_skipped])+1;
+        if (n==1 || ((n & (n - 1)) == 0)) {
+            Log::info("Skipping unsafe %ld %s", n, unsafe_frame);
+        }
+        num_frames += makeFrame(frames + num_frames, BCI_ERROR, "java_skipped");
+    }
+
+    else {
+        if (_cstack == CSTACK_VMX) {
+            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT);
+        } else if (event_type <= WALL_CLOCK_SAMPLE) {
+            // Async events
+            if (_cstack == CSTACK_VM) {
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
+            } else {
+                int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
+                if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
+                    NMethod *nmethod = CodeHeap::findNMethod(java_ctx.pc);
+                    if (nmethod != NULL) {
+                        fillFrameTypes(frames + num_frames, java_frames, nmethod);
+                    }
                 }
+                num_frames += java_frames;
             }
-            num_frames += java_frames;
-        }
-    } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
-        VMThread* vm_thread;
-        if (VMStructs::hasStackStructs() && (vm_thread = VMThread::current()) != NULL) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor());
-        } else {
+        } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
+            VMThread *vm_thread;
+            if (VMStructs::hasStackStructs() && (vm_thread = VMThread::current()) != NULL) {
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor());
+            } else {
+                num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
+            }
+        } else if (event_type == MALLOC_SAMPLE ||
+                   event_type == JEMALLOC_SAMPLE) { // MS
             num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
+        } else {
+            // Lock events and instrumentation events can safely call synchronous JVM TI stack walker.
+            // Skip Instrument.recordSample() method
+            int start_depth = event_type == INSTRUMENTED_METHOD ? 1 : 0;
+            num_frames += getJavaTraceJvmti(jvmti_frames + num_frames, frames + num_frames, start_depth, _max_stack_depth);
         }
-    } else if (event_type == MALLOC_SAMPLE) {
-        num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
-    } else {
-        // Lock events and instrumentation events can safely call synchronous JVM TI stack walker.
-        // Skip Instrument.recordSample() method
-        int start_depth = event_type == INSTRUMENTED_METHOD ? 1 : 0;
-        num_frames += getJavaTraceJvmti(jvmti_frames + num_frames, frames + num_frames, start_depth, _max_stack_depth);
     }
 
     if (num_frames == 0) {
@@ -704,12 +972,67 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         atomicInc(_total_stack_walk_time, stack_walk_end - stack_walk_begin);
     }
 
-    u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter);
-    _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
+    // MS: Look for an await insertion point in java stack
+    if (unsafe_frame == NULL) {
+        AwaitData *ad = awaitData();
+        if (ad && ad->insertionId) {
+            const long *ids = ad->stackId;
+            int i = 0;
+            while (long id = *ids++) { // zero terminated
+                for (; i < num_frames; i++) {
+                    if (frames[i].method_id == (jmethodID) ad->insertionId) {
+                        frames[i].method_id = (jmethodID) id;
+                        frames[i].bci = BCI_AWAIT_INSERTION;
+                        ad->sampledSignal = ad->sampledSignalToSet;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // MS: Add custom id frame
+    if(event_type == CUSTOM) {
+        CustomEvent *e = (CustomEvent*) event;
+        num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, e->info);
+    }
+    // MS: Add event type identification frame
+    else if (_eventtypeframes) {
+        if (event_type == LOCK_SAMPLE || event_type == PARK_SAMPLE)
+            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "Lock");
+        else if (event_type == ALLOC_SAMPLE)
+            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "Alloc");
+        else if (event_type == JEMALLOC_SAMPLE)
+            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "AllocNative");
+    }
+
+    // MS: Add external context tag if set so parent process can attach stack
+    if (externalContext && *externalContext && *externalContext != -1L) {
+        num_frames += makeFrame(frames + num_frames, BCI_STACK_TAG, (jmethodID) *externalContext);
+    }
+
+    u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter,
+                                                tagp); // MS
+    if (event)  // MS: there might not be an event if this is a persistent live reference.
+        _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
 
     _locks[lock_index].unlock();
     return (u64)tid << 32 | call_trace_id;
 }
+// MS: Record custom sample explicitly, optionally with stack id hash and error frame
+void Profiler::recordExternalSample(u64 counter, const char* customType, const char * error, u64 sidref) {
+    atomicInc(_total_samples);
+    ASGCT_CallFrame frames[4];
+    int n = 0;
+    if (sidref) n += makeFrame(frames + n, BCI_STACK_TAG, (jmethodID) sidref);
+    if (error) n += makeFrame(frames + n, BCI_ERROR, error);
+    if (customType) n += makeFrame(frames + n, BCI_CUSTOM, customType);
+    if (externalContext && *externalContext && *externalContext != -1L)
+        n += makeFrame(frames + n, BCI_STACK_TAG, (jmethodID) *externalContext);
+    if (n)
+       _call_trace_storage.put(n, frames, counter, 0);
+}
+
 
 void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames) {
     atomicInc(_total_samples);
@@ -721,7 +1044,8 @@ void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, 
         num_frames += makeFrame(frames + num_frames, BCI_ERROR, OS::schedPolicy(tid));
     }
 
-    u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter);
+    u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter,
+                                                NULL); // MS
 
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
@@ -733,7 +1057,8 @@ void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, 
         return;
     }
 
-    _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
+    if (event)  // Possibly no event for persistent live
+        _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
 
     _locks[lock_index].unlock();
 }
@@ -750,6 +1075,31 @@ void Profiler::recordExternalSamples(u64 samples, u64 counter, int tid, u32 call
     }
 
     _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
+
+    _locks[lock_index].unlock();
+}
+
+// MS: Increase counter on a trace that was already recorded, extracting trace/thread id from long
+void Profiler::recordExternalSample(u64 counter, EventType event_type, Event* event, long trace) {
+    int tid = trace >> 32;
+    u32 call_trace_id = (u32) trace;
+    recordExternalSample(counter, tid, event_type, event, call_trace_id);
+}
+
+// MS: Increase counter on a trace that was already recorded.
+void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id) {
+    _call_trace_storage.add(call_trace_id, 1, counter);
+
+    u32 lock_index = getLockIndex(tid);
+    if (!_locks[lock_index].tryLock() &&
+        !_locks[lock_index = (lock_index + 1) % CONCURRENCY_LEVEL].tryLock() &&
+        !_locks[lock_index = (lock_index + 2) % CONCURRENCY_LEVEL].tryLock())
+    {
+        return;
+    }
+
+    if (event)
+        _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
 
     _locks[lock_index].unlock();
 }
@@ -973,6 +1323,7 @@ void Profiler::updateNativeThreadNames() {
 }
 
 bool Profiler::excludeTrace(FrameName* fn, CallTrace* trace) {
+    if(trace->frames[0].bci == BCI_AWAIT_MARKER) return true;
     bool checkInclude = fn->hasIncludeList();
     bool checkExclude = fn->hasExcludeList();
     if (!(checkInclude || checkExclude)) {
@@ -1021,8 +1372,11 @@ Engine* Profiler::selectEngine(const char* event_name) {
     }
 }
 
-Engine* Profiler::selectAllocEngine(long alloc_interval, bool live) {
-    if (VM::addSampleObjectsCapability()) {
+Engine* Profiler::selectAllocEngine(Arguments& args) {
+    // MS: Object sampler is used for both java and jemalloc native allocations.  Will be enabled if either in use.
+    bool object_sampling = VM::addSampleObjectsCapability();
+    bool jemalloc_sampling =  args._jemalloc && ObjectSampler::checkJemallocEnabled();
+    if (object_sampling || jemalloc_sampling) {
         return &object_sampler;
     } else if (VM::isOpenJ9()) {
         return &j9_object_sampler;
@@ -1087,6 +1441,9 @@ Error Profiler::start(Arguments& args, bool reset) {
         return error;
     }
 
+    _eventtypeframes = args._eventtypeframes;  // MS
+    _persist = args._persist; // MS
+
     _event_mask = (args._event != NULL ? EM_CPU : 0) |
                   (args._alloc >= 0 ? EM_ALLOC : 0) |
                   (args._lock >= 0 ? EM_LOCK : 0) |
@@ -1095,9 +1452,10 @@ Error Profiler::start(Arguments& args, bool reset) {
 
     if (_event_mask == 0) {
         return Error("No profiling events specified");
-    } else if ((_event_mask & (_event_mask - 1)) && args._output != OUTPUT_JFR) {
+    } else if ((_event_mask & (_event_mask - 1)) && args._output != OUTPUT_JFR &&
+                 !_eventtypeframes) { // MS: event frames allow multiple events
         return Error("Only JFR output supports multiple events");
-    } else if (!VM::loaded() && (_event_mask & (EM_ALLOC | EM_LOCK))) {
+    } else if (!VM::loaded() && (_event_mask & (EM_LOCK))) {
         return Error("Profiling event is not supported with non-Java processes");
     }
 
@@ -1208,7 +1566,7 @@ Error Profiler::start(Arguments& args, bool reset) {
     }
 
     if (_event_mask & EM_ALLOC) {
-        _alloc_engine = selectAllocEngine(args._alloc, args._live);
+        _alloc_engine = selectAllocEngine(args);
         error = _alloc_engine->start(args);
         if (error) {
             goto error2;
@@ -1270,6 +1628,12 @@ error1:
     return error;
 }
 
+// MS
+void Profiler::stop_jemalloc() {
+    MutexLocker ml(_state_lock);
+    if ((_event_mask & EM_ALLOC) && _alloc_engine) _alloc_engine->stop_jemalloc();
+}
+
 Error Profiler::stop(bool restart) {
     MutexLocker ml(_state_lock);
     if (_state != RUNNING) {
@@ -1309,6 +1673,8 @@ Error Profiler::stop(bool restart) {
     return Error::OK;
 }
 
+volatile GlobalFlags Profiler::globalFlags = GF_NONE;  // MS
+
 Error Profiler::check(Arguments& args) {
     MutexLocker ml(_state_lock);
     if (_state > IDLE) {
@@ -1322,7 +1688,7 @@ Error Profiler::check(Arguments& args) {
         error = _engine->check(args);
     }
     if (!error && args._alloc >= 0) {
-        _alloc_engine = selectAllocEngine(args._alloc, args._live);
+        _alloc_engine = selectAllocEngine(args);
         error = _alloc_engine->check(args);
     }
     if (!error && args._nativemem >= 0) {
@@ -1367,6 +1733,12 @@ Error Profiler::flushJfr() {
 
 Error Profiler::dump(Writer& out, Arguments& args) {
     MutexLocker ml(_state_lock);
+    // MS: Stop allocation engine in dump if persisting
+    if (_persist && _event_mask & EM_ALLOC && _state == RUNNING) {
+        _alloc_engine->stop();
+        _event_mask &= !EM_ALLOC; // will be reset at next start
+    }
+
     if (_state != IDLE && _state != RUNNING) {
         return Error("Profiler has not started");
     }
@@ -1463,9 +1835,12 @@ void Profiler::dumpCollapsed(Writer& out, Arguments& args) {
     FrameName fn(args, args._style | STYLE_NO_SEMICOLON, _epoch, _thread_names_lock, _thread_names);
     char buf[32];
     u64 printed_sample_count = 0;
+    Dictionary* dict = args._memoizeframes ? new Dictionary() : NULL;
+    unsigned int mask = 1 << 29;
 
     std::vector<CallTraceSample*> samples;
     _call_trace_storage.collectSamples(samples);
+    FrameIterator fi(samples, _savedAwaitStacks);
 
     for (std::vector<CallTraceSample*>::const_iterator it = samples.begin(); it != samples.end(); ++it) {
         CallTrace* trace = (*it)->acquireTrace();
@@ -1474,14 +1849,29 @@ void Profiler::dumpCollapsed(Writer& out, Arguments& args) {
         u64 counter = args._counter == COUNTER_SAMPLES ? (*it)->samples : (*it)->counter;
         if (counter == 0) continue;
 
-        for (int j = trace->num_frames - 1; j >= 0; j--) {
-            const char* frame_name = fn.name(trace->frames[j]);
-            out << frame_name << (j == 0 ? ' ' : ';');
+        int n = fi.setAndCount(trace, true);
+
+        ASGCT_CallFrame* frame;
+        int j = n-1;
+        while((frame = fi.prev()) != NULL) {
+            const char* frame_name = fn.name(*frame);
+            if (dict) {
+                unsigned int i = dict->lookup(frame_name, strlen(frame_name), mask);
+                if (i & mask) // not new
+                    out << (i & ~mask);
+                else
+                    out << i << "=" << frame_name;
+            } else {
+                out << frame_name;
+            }
+            out << (j-- == 0 ? ' ' : ';');
         }
         // Beware of locale-sensitive conversion
         out.write(buf, snprintf(buf, sizeof(buf), "%llu\n", counter));
         printed_sample_count++;
     }
+
+    if (dict) delete dict;
     logEmptyOutput(args, printed_sample_count, out);
 }
 
@@ -1504,6 +1894,7 @@ void Profiler::dumpFlameGraph(Writer& out, Arguments& args, bool tree) {
 
         std::vector<CallTraceSample*> samples;
         _call_trace_storage.collectSamples(samples);
+    FrameIterator fi(samples, _savedAwaitStacks);
 
         for (std::vector<CallTraceSample*>::const_iterator it = samples.begin(); it != samples.end(); ++it) {
             CallTrace* trace = (*it)->acquireTrace();
@@ -1553,10 +1944,12 @@ void Profiler::dumpText(Writer& out, Arguments& args) {
     char buf[1024] = {0};
 
     std::vector<CallTraceSample> samples;
+    FrameIterator *fi;
     u64 total_counter = 0;
     {
         std::map<u64, CallTraceSample> map;
         _call_trace_storage.collectSamples(map);
+        fi = new FrameIterator(map, _savedAwaitStacks);
         samples.reserve(map.size());
 
         for (std::map<u64, CallTraceSample>::const_iterator it = map.begin(); it != map.end(); ++it) {
@@ -1604,9 +1997,12 @@ void Profiler::dumpText(Writer& out, Arguments& args) {
             out << buf;
 
             CallTrace* trace = it->trace;
-            for (int j = 0; j < trace->num_frames; j++) {
-                const char* frame_name = fn.name(trace->frames[j]);
-                snprintf(buf, sizeof(buf) - 1, "  [%2d] %s\n", j, frame_name);
+            fi->set(trace, false);
+            ASGCT_CallFrame* aframe;
+            int j = 0;
+            while((aframe = fi->next())) {
+                const char* frame_name = fn.name(*aframe);
+                snprintf(buf, sizeof(buf) - 1, "  [%2d] %s\n", j++, frame_name);
                 out << buf;
             }
             out << "\n";
@@ -1771,6 +2167,10 @@ Error Profiler::runInternal(Arguments& args, Writer& out) {
             }
             break;
         }
+        case ACTION_STOP_JEMALLOC: {
+            stop_jemalloc();
+            break;
+        }
         case ACTION_STOP: {
             Error error = stop();
             if (args._output == OUTPUT_NONE) {
@@ -1854,7 +2254,7 @@ Error Profiler::run(Arguments& args) {
     } else {
         // Open output file under the lock to avoid races with background timer
         MutexLocker ml(_state_lock);
-        FileWriter out(args.file());
+        AtomicOutputFile out(args);
         if (!out.is_open()) {
             return Error("Could not open output file");
         }
@@ -1871,7 +2271,7 @@ Error Profiler::restart(Arguments& args) {
     }
 
     if (args._file != NULL && args._output != OUTPUT_NONE && args._output != OUTPUT_JFR) {
-        FileWriter out(args.file());
+        AtomicOutputFile out(args);
         if (!out.is_open()) {
             return Error("Could not open output file");
         }

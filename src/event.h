@@ -18,6 +18,7 @@ enum EventType {
     WALL_CLOCK_SAMPLE,
     INSTRUMENTED_METHOD,
     MALLOC_SAMPLE,
+    JEMALLOC_SAMPLE,  // MS: must be before alloc_sample due to inequality check in profiler.cpp
     ALLOC_SAMPLE,
     ALLOC_OUTSIDE_TLAB,
     LIVE_OBJECT,
@@ -25,6 +26,7 @@ enum EventType {
     PARK_SAMPLE,
     PROFILING_WINDOW,
     USER_EVENT,
+    CUSTOM  // MS
 };
 
 class Event {
@@ -76,6 +78,13 @@ class ProfilingWindow : public Event {
   public:
     u64 _start_time;
     u64 _end_time;
+};
+
+class CustomEvent : public Event {
+public:
+    int offset;
+    double value;
+    const char* info;
 };
 
 class MallocEvent : public Event {

@@ -1,0 +1,9 @@
+language: cpp
+
+train_version: 1.0
+
+toolchains: [ rhel6, rhel7, rhel8 ]
+
+build: build-ms.sh
+
+test: test-ms.sh

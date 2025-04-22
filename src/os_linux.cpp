@@ -291,6 +291,14 @@ int OS::getProfilingSignal(int mode) {
     return signo;
 }
 
+volatile u64 OS::allocated = 0;  // MS
+volatile u64 OS::freed = 0;  // MS
+
+// MS
+long OS::getAllocated() {
+    return (long) allocated - (long) freed;
+}
+
 bool OS::sendSignalToThread(int thread_id, int signo) {
     return syscall(__NR_tgkill, processId(), thread_id, signo) == 0;
 }
@@ -302,11 +310,13 @@ void* OS::safeAlloc(size_t size) {
     if (result < 0 && result > -4096) {
         return NULL;
     }
+    atomicInc(allocated, (u64) size); // MS
     return (void*)result;
 }
 
 void OS::safeFree(void* addr, size_t size) {
     syscall(__NR_munmap, addr, size);
+    atomicInc(freed, (u64) size);  // MS
 }
 
 bool OS::getCpuDescription(char* buf, size_t size) {
