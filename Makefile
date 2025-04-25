@@ -13,6 +13,7 @@ LIB?=lib
 OPT?=-O3
 
 ASPROF=bin/asprof
+JFRCONV=bin/jfrconv
 LIB_PROFILER=$(LIB)/libasyncProfiler.$(SOEXT)
 API_JAR=jar/async-profiler.jar
 CONVERTER_JAR=jar/jfr-converter.jar
@@ -34,8 +35,8 @@ CFLAGS=$(OPT) -fno-exceptions $(CFLAGS_EXTRA)
 CXXFLAGS=$(OPT) -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden
 CPPFLAGS=
 DEFS=-DPROFILER_VERSION=\"$(PROFILER_VERSION)\"
-INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper -I/ms/dist/fsf/PROJ/zlib/1.2.8-5/include
-LIBS=-ldl -lpthread -L/ms/dist/fsf/PROJ/zlib/1.2.8-5/lib -lz
+INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper
+LIBS=-ldl -lpthread -lz
 MERGE=false
 GCOV ?= gcov
 

@@ -451,7 +451,7 @@ void ObjectSampler::recordAllocation(jvmtiEnv* jvmti, JNIEnv* jni, EventType eve
             u64 trace = Profiler::instance()->recordSample(NULL, 0, event_type, &event, &tag);
             const char *err = live_refs.add(jni, object, event._total_size, trace, tag);
             if (err) {
-                Log::warn("Unable to record object allocation of %ld, %s", event._total_size, err);
+                Log::warn("Unable to record object allocation of %llu, %s", event._total_size, err);
                 // Add to the lost allocation counter
                 Profiler::instance()->recordExternalSample(event._total_size, "Lost", err, 0);
                 // Increment count on the allocation, since it will otherwise not be reported
@@ -540,7 +540,7 @@ bool ObjectSampler::checkJemallocEnabled() {
             // we can report a proper stack value.
             jemalloc_enabled &= !mallctl("opt.lg_prof_sample", &log_sample, &sz, NULL, 0);
             _jemallocInterval = log_sample>0 ? 1 << log_sample : 0;
-            Log::info("jemallocInterval=%d", _jemallocInterval);
+            Log::info("jemallocInterval=%llu", _jemallocInterval);
             jemalloc_enabled &= (_jemallocInterval > 0);
         }
         if (jemalloc_enabled) {

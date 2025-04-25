@@ -55,9 +55,14 @@ Java_one_profiler_AsyncProfiler_externalContext(JNIEnv* env, jobject unused, jlo
    if(shmpath) env->ReleaseStringUTFChars(shmpath, shmpath_str);
 }
 
-extern "C" DLLEXPORT long JNICALL
-Java_one_profiler_AsyncProfiler_getAwaitDataAddress(JNIEnv* env, jobject unused) {
-    return Profiler::instance()->getAwaitDataAddress();
+extern "C" DLLEXPORT jlong JNICALL
+Java_one_profiler_AsyncProfiler_getAwaitDataAddress(JNIEnv* env, jclass unused) {
+    return (jlong) Profiler::instance()->awaitData(true);
+}
+
+extern "C" DLLEXPORT jint JNICALL
+Java_one_profiler_AsyncProfiler_initAwaitData(JNIEnv* env, jclass unused, jint slots) {
+    return Profiler::instance()->initAwaitData(slots);
 }
 
 extern "C" DLLEXPORT long JNICALL
@@ -67,6 +72,12 @@ Java_one_profiler_AsyncProfiler_saveAwaitFrames(JNIEnv* env, jobject unused, int
   env->ReleasePrimitiveArrayCritical(ids, (void*) elems, 0);
   return ret;
 }
+
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_recordDeferred(JNIEnv* env, jobject unused, jint n, jlong ms) {
+   Profiler::instance()->recordDeferred(n, ms);
+}
+
 
 extern "C" DLLEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_addCustomEventType(JNIEnv* env, jobject unused, jint i, jstring event, jstring value) {
@@ -242,12 +253,15 @@ static const JNINativeMethod profiler_natives[] = {
     F(filterThread0, "(Ljava/lang/Thread;Z)V"),
     F(getMethodID,   "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)J"),
     F(getAwaitDataAddress, "()J"),
+    F(initAwaitData, "(I)I"),
     F(saveAwaitFrames, "(I[JI)J"),
     F(externalContext, "(JLjava/lang/String;)V"),
     F(saveString,    "(Ljava/lang/String;)J"),
     F(recordCustomEvent, "(IDJLL)V"),
     F(addCustomEventType, "(ILjava/lang/String;Ljava/lang/String;)V"),
     F(testMalloc, "(J)J"),
+    F(recordDeferred, "(IJ)V"),
+    F(getInternals,"()[J"),
     F(testFree, "(J)V"),
     F(testIgnored, "(I)D"),
     F(getInternals,"()[J"),
