@@ -13,6 +13,7 @@ LIB?=lib
 OPT?=-O3
 
 ASPROF=bin/asprof
+JFRCONV=bin/jfrconv
 LIB_PROFILER=$(LIB)/libasyncProfiler.$(SOEXT)
 API_JAR=jar/async-profiler.jar
 CONVERTER_JAR=jar/jfr-converter.jar

@@ -51,7 +51,6 @@ static int pthread_setspecific_hook(pthread_key_t key, const void* value) {
 void CpuEngine::onThreadStart() {
     // MS: Force call to jni_GetEnv so that __tls_get_addr is called now rather than later. Not clear that this helps.
     VM::jni();
-
     CpuEngine* current = __atomic_load_n(&_current, __ATOMIC_ACQUIRE);
     if (current != NULL) {
         current->createForThread(OS::threadId());
@@ -68,7 +67,7 @@ void CpuEngine::onThreadEnd() {
 // MS: Allow marking specific native methods as unsafe and therefore preventing java stack walking when present.
 static bool isUnsafe(const char* name) {
     return (strcmp(name, "update_get_addr") == 0) ||
-            (strcmp(name, "je_arena_realloc") == 0) ||
+            (strcmp(name, "je_arena_ralloc") == 0) ||
             (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
 }
 static void markUnsafeFunctions() {
