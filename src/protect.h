@@ -6,6 +6,8 @@
 #ifndef _PROTECT_H
 #define _PROTECT_H
 
+#include "arch.h"
+
 
 class Protect {
 private:

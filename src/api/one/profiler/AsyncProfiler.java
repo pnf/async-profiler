@@ -301,4 +301,8 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     static public native void testFree(long addr);
     static public native double testIgnored(int count);
     public native long[] getInternals();
+    public native long gzlogOpen(String path);
+    public native int gzlogWrite(long log, byte[] data, int offset, int len);
+    public native int gzlogFlush(long log);
+    public native int gzlogClose(long log);
 }

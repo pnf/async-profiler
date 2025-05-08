@@ -5,12 +5,15 @@
 
 #include <algorithm>
 #include <fstream>  // MS: for atomic output file
-#include <dlfcn.h>
+#include <dlfcn.h> // MS
+#include <sys/mman.h> // MS
+#include <sys/stat.h>  // MS
 #include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h> // MS
 #include <sys/param.h>
 #include "profiler.h"
 #include "perfEvents.h"

@@ -34,9 +34,9 @@ CFLAGS=$(OPT) -fno-exceptions $(CFLAGS_EXTRA)
 CXXFLAGS=$(OPT) -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden
 CPPFLAGS=
 DEFS=-DPROFILER_VERSION=\"$(PROFILER_VERSION)\"
-INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper
-LIBS=-ldl -lpthread
-MERGE=true
+INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper -I/ms/dist/fsf/PROJ/zlib/1.2.8-5/include
+LIBS=-ldl -lpthread -L/ms/dist/fsf/PROJ/zlib/1.2.8-5/lib -lz
+MERGE=false
 GCOV ?= gcov
 
 JAVAC=$(JAVA_HOME)/bin/javac
@@ -53,7 +53,7 @@ SKIP?=
 TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip=$(SKIP)
 
 # always sort SOURCES so zInit is last.
-SOURCES := $(sort $(wildcard src/*.cpp))
+SOURCES := $(sort $(wildcard src/*.cpp)) src/zlib/gzlog.c
 HEADERS := $(wildcard src/*.h)
 RESOURCES := $(wildcard src/res/*)
 JAVA_HELPER_SOURCE := $(wildcard src/helper/one/profiler/*.java)

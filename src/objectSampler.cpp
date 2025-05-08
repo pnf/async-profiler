@@ -8,6 +8,8 @@
 #include "objectSampler.h"
 #include "profiler.h"
 #include "tsc.h"
+#include <dlfcn.h> //MS
+
 
 // MS: Anything with jemalloc in its name is ours...
 

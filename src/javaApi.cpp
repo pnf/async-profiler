@@ -6,13 +6,15 @@
 #include <errno.h>
 #include <string.h>
 #include <math.h> // MS
+#include <dlfcn.h> //MS
 #include "asprof.h"
 #include "incbin.h"
 #include "javaApi.h"
 #include "os.h"
 #include "profiler.h"
 #include "vmStructs.h"
-
+#include "jfrMetadata.h"
+#include "zlib/gzlog.h" // MS
 
 INCLUDE_HELPER_CLASS(SERVER_NAME, SERVER_CLASS, "one/profiler/Server")
 
@@ -43,7 +45,7 @@ Java_one_profiler_AsyncProfiler_saveString(JNIEnv* env, jobject unused, jstring 
     const char* name_str = env->GetStringUTFChars(name, NULL);
     char *p = strdup(name_str);
     env->ReleaseStringUTFChars(name, name_str);
-    return (long) p;
+    return (jlong) p;
 }
 
 extern "C"  DLLEXPORT void JNICALL
@@ -204,6 +206,31 @@ Java_one_profiler_AsyncProfiler_filterThread0(JNIEnv* env, jobject unused, jthre
     }
 }
 
+extern "C" DLLEXPORT jlong JNICALL
+Java_one_profiler_AsyncProfiler_gzlogOpen(JNIEnv* env, jobject unused, jstring path ) {
+   const char* path_str = env->GetStringUTFChars(path, NULL);
+   jlong ret = (jlong) gzlog_open(path_str);
+   env->ReleaseStringUTFChars(path, path_str);
+   return ret;
+}
+
+extern "C" DLLEXPORT jint JNICALL
+Java_one_profiler_AsyncProfiler_gzlogWrite(JNIEnv* env, jobject unused, jlong log, jbyteArray data, jint offset, jint len) {
+    const char *data_str = (const char*) env->GetByteArrayElements(data, NULL) + offset;
+    jint ret = (jlong) gzlog_write((gzlog*) log, data_str, len);
+    env->ReleaseByteArrayElements(data, (jbyte*) data_str, JNI_ABORT);
+    return ret;
+}
+
+extern "C" DLLEXPORT jint JNICALL
+   Java_one_profiler_AsyncProfiler_gzlogFlush(JNIEnv* env, jobject unused, jlong log) {
+   return gzlog_compress((gzlog*) log);
+}
+
+extern "C" DLLEXPORT jint JNICALL
+Java_one_profiler_AsyncProfiler_gzlogClose(JNIEnv* env, jobject unused, jlong log) {
+    return gzlog_close((gzlog*) log);
+}
 
 #define F(name, sig)  {(char*)#name, (char*)sig, (void*)Java_one_profiler_AsyncProfiler_##name}
 
@@ -223,7 +250,11 @@ static const JNINativeMethod profiler_natives[] = {
     F(testMalloc, "(J)J"),
     F(testFree, "(J)V"),
     F(testIgnored, "(I)D"),
-    F(getInternals,"()[J")
+    F(getInternals,"()[J"),
+    F(gzlogOpen,"(Ljava/lang/String;)J"),
+    F(gzlogWrite,"(J[BII)I"),
+    F(gzlogFlush,"(J)I"),
+    F(gzlogClose,"(J)I")
 };
 
 static const JNINativeMethod* execute0 = &profiler_natives[2];

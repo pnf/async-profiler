@@ -8,6 +8,8 @@
 
 #include <stdarg.h>
 #include "mutex.h"
+#include "arguments.h" // MS
+
 
 #ifdef __GNUC__
 #define ATTR_FORMAT __attribute__((format(printf, 1, 2)))
@@ -25,8 +27,6 @@ enum LogLevel {
     LOG_NONE
 };
 
-
-class Arguments;
 
 class Log {
   private:

@@ -7,6 +7,7 @@
 #define _JAVAAPI_H
 
 #include <jvmti.h>
+#include <jni.h>
 
 
 class JavaAPI {

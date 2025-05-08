@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "arguments.h"
+#include "profiler.h"
 
 
 // Arguments of the last start/resume command; reused for shutdown and restart
