@@ -195,6 +195,8 @@ class VM {
 
     static jvmtiError JNICALL RedefineClassesHook(jvmtiEnv* jvmti, jint class_count, const jvmtiClassDefinition* class_definitions);
     static jvmtiError JNICALL RetransformClassesHook(jvmtiEnv* jvmti, jint class_count, const jclass* classes);
+
+    static void markUnsafeFunctions();
 };
 
 #endif // _VMENTRY_H

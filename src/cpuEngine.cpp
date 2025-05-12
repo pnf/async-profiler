@@ -51,6 +51,7 @@ static int pthread_setspecific_hook(pthread_key_t key, const void* value) {
 void CpuEngine::onThreadStart() {
     // MS: Force call to jni_GetEnv so that __tls_get_addr is called now rather than later. Not clear that this helps.
     VM::jni();
+
     CpuEngine* current = __atomic_load_n(&_current, __ATOMIC_ACQUIRE);
     if (current != NULL) {
         current->createForThread(OS::threadId());
@@ -61,20 +62,6 @@ void CpuEngine::onThreadEnd() {
     CpuEngine* current = __atomic_load_n(&_current, __ATOMIC_ACQUIRE);
     if (current != NULL) {
         current->destroyForThread(OS::threadId());
-    }
-}
-
-// MS: Allow marking specific native methods as unsafe and therefore preventing java stack walking when present.
-static bool isUnsafe(const char* name) {
-    return (strcmp(name, "update_get_addr") == 0) ||
-            (strcmp(name, "je_arena_ralloc") == 0) ||
-            (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
-}
-static void markUnsafeFunctions() {
-    CodeCacheArray* native_libs = Profiler::instance()->nativeLibs();
-    const int native_lib_count = native_libs->count();
-    for (int i=0; i < native_lib_count; i++) {
-        (*native_libs)[i]->mark(isUnsafe, MARK_UNSAFE);
     }
 }
 
@@ -89,7 +76,7 @@ bool CpuEngine::setupThreadHook() {
         return true;
     }
 
-    markUnsafeFunctions(); // MS
+    VM::markUnsafeFunctions(); // MS - should have already been done...
 
     // Depending on Zing version, pthread_setspecific is called either from libazsys.so or from libjvm.so
     if (VM::isZing()) {

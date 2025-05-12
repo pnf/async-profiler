@@ -132,6 +132,22 @@ bool VM::hasJvmThreads() {
     return threads_found == 3;
 }
 
+// MS: Allow marking specific native methods as unsafe and therefore preventing java stack walking when present.
+static bool isUnsafe(const char* name) {
+    return (strcmp(name, "update_get_addr") == 0) ||
+            (strcmp(name, "_dl_resize_dtv") == 0) ||
+            (strcmp(name, "_dl_update_slotinfo") == 0) ||
+           (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
+}
+
+void VM::markUnsafeFunctions() {
+    CodeCacheArray* native_libs = Profiler::instance()->nativeLibs();
+    const int native_lib_count = native_libs->count();
+    for (int i=0; i < native_lib_count; i++) {
+        (*native_libs)[i]->mark(isUnsafe, MARK_UNSAFE);
+    }
+}
+
 bool VM::init(JavaVM* vm, bool attach) {
     if (_jvmti != NULL) return true;
 
@@ -296,6 +312,8 @@ bool VM::init(JavaVM* vm, bool attach) {
     } else {
         _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL);
     }
+
+    markUnsafeFunctions();  // MS
 
     return true;
 }

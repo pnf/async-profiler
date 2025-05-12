@@ -24,7 +24,6 @@
 #include "trap.h"
 #include "vmEntry.h"
 #include "writer.h"
-#include "queue/blockingconcurrentqueue.h"
 
 
 const int MAX_NATIVE_FRAMES = 128;
@@ -82,20 +81,7 @@ public:
 
 static const int MAX_AWAIT_STACKS = 10;
 
-struct AwaitData;
-struct Deferred {
-    ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]; // frames captured from signal callback
-    volatile AwaitData* awaitData;               // await data for captured thread
-    jthread thread;
-    u64 counter;
-    EventType event_type;
-    Event event;
-    int first_java_frame;
-};
-
-typedef moodycamel::BlockingConcurrentQueue<Deferred>::producer_token_t producer_token_t;
-
-struct AwaitData {
+typedef struct AwaitData_ {
     // The order of fields is important if getAwaitDataAddress() is used.
     // When sampling occurs, we will search for a method_id == insertionId.
     // Starting from the innermost frame, we replace matching ids with successive
@@ -105,17 +91,12 @@ struct AwaitData {
     long sampledSignalToSet;
     long sampledSignal;
     long stackId[MAX_AWAIT_STACKS+1];
-    // os thread-local data:
-    long mounted_vthread_id;
-    jthread mounted_vthread;
-    producer_token_t* producer_token;
-};
+} AwaitData;
 
 enum GlobalFlags {
     GF_NONE = 0,
     GF_NO_SHUTDOWN = 1
 };
-
 
 class Profiler {
   private:
@@ -189,7 +170,7 @@ class Profiler {
     jmethodID getCurrentCompileTask();
     int getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx, const char** unsafe);
     int getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackContext* java_ctx);
-    int getJavaTraceJvmti(jthread othread, jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
+    int getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
     void fillFrameTypes(ASGCT_CallFrame* frames, int num_frames, NMethod* nmethod);
     void setThreadInfo(int tid, const char* name, jlong java_thread_id);
     void updateThreadName(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);
@@ -227,11 +208,9 @@ class Profiler {
 
     int bail(int tid, EventType event_type, int lock_index);
 
+    AwaitData* awaitData();
+    AwaitData* maybeInitAwaitData();
     bool _savedAwaitStacks = false;
-    volatile AwaitData* _vtAwaitData;
-    int _vtSlots;
-
-    moodycamel::BlockingConcurrentQueue<Deferred> _dq;
 
     static Profiler* const _instance;
 
@@ -254,10 +233,7 @@ class Profiler {
         _native_libs(),
         _call_stub_begin(NULL),
         _call_stub_end(NULL),
-        _dlopen_entry(NULL),
-        _vtAwaitData(NULL),
-        _vtSlots(0),
-        _dq(CONCURRENCY_LEVEL * 2) {
+        _dlopen_entry(NULL) {
 
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
             _calltrace_buffer[i] = NULL;
@@ -274,9 +250,7 @@ class Profiler {
       return _savedAwaitStacks;
     }
 
-    AwaitData* threadLocalAwaitData(bool may_init);
-    volatile AwaitData* awaitData(bool may_init = false);
-    int initAwaitData(int slots);
+    long getAwaitDataAddress();
     long saveAwaitFrames(AwaitFrameType,long*,int);
     void setExternalContext(long ctx, const char* shmpath);
 
@@ -301,11 +275,11 @@ class Profiler {
     void logStats();
     void switchThreadEvents(jvmtiEventMode mode);
     int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type, const char ** unsafe);
-    u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp = NULL, Deferred* deferred = NULL);
+    u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp = NULL);
     void recordExternalSample(u64 counter, const char* custom, const char* error, u64 sidref);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
-    void recordDeferred(int n, long ms);
+
     void recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event);
     void recordExternalSample(u64 counter, EventType event_type, Event* event, long trace);
     void recordEventOnly(EventType event_type, Event* event);

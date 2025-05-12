@@ -281,7 +281,6 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
      */
     public native long getAwaitDataAddress();
 
-    public native int initAwaitData(int vtSlots);
 
     /**
      * @param tp      - 1 if ids are jmethodIDs, 2 if they are char*
@@ -301,6 +300,5 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     static public native long testMalloc(long sz);
     static public native void testFree(long addr);
     static public native double testIgnored(int count);
-    public native void recordDeferred(int n, long ms);
     public native long[] getInternals();
 }
