@@ -137,6 +137,10 @@ static bool isUnsafe(const char* name) {
     return (strcmp(name, "update_get_addr") == 0) ||
             (strcmp(name, "_dl_resize_dtv") == 0) ||
             (strcmp(name, "_dl_update_slotinfo") == 0) ||
+            (strcmp(name, "__tls_get_addr") == 0) ||
+            (strcmp(name, "__tls_get_addr_slow") == 0) ||
+            (strncmp(name,"je_arena", 8) == 0) ||
+            (strncmp(name,"je_tcache", 9) == 0) ||
            (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
 }
 
