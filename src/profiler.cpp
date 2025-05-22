@@ -918,7 +918,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     }
 
     // If an unsafe frame was detected in native stack, skip java stack.
-    if (unsafe_frame) {
+    if (unsafe_frame && _cstack < CSTACK_VM) {
         long n = atomicInc(_failures[-java_skipped])+1;
         if (n==1 || ((n & (n - 1)) == 0)) {
             Log::info("Skipping unsafe %ld %s", n, unsafe_frame);
