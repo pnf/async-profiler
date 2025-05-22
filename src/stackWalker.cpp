@@ -382,7 +382,7 @@ int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth,
                 }
             }
         } else {
-            fillFrame(frames[depth++], BCI_NATIVE_FRAME, profiler->findNativeMethod(pc));
+            //fillFrame(frames[depth++], BCI_NATIVE_FRAME, profiler->findNativeMethod(pc)); // can remove this one
         }
 
         uintptr_t prev_sp = sp;

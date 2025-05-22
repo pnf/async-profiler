@@ -43,6 +43,7 @@ class StackWalker {
     static int walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, JavaFrameAnchor* anchor);
 
     static void checkFault();
+
 };
 
 #endif // _STACKWALKER_H

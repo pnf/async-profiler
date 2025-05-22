@@ -550,9 +550,7 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
         native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
-    } else if (_cstack >= CSTACK_VM) {
-        return 0;
-    } else if (_cstack == CSTACK_DWARF) {
+    } else if (_cstack == CSTACK_DWARF || _cstack >= CSTACK_VM) {
         native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     } else {
         native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
@@ -933,6 +931,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
             if (_cstack == CSTACK_VM) {
                 num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
             } else {
+                // When using CSTACK_DWARF we use this and it works
                 int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
                 if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
                     NMethod *nmethod = CodeHeap::findNMethod(java_ctx.pc);
