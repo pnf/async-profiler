@@ -62,7 +62,7 @@ enum SHORT_ENUM CStack {
     CSTACK_LBR,      // Last Branch Record hardware capability
     CSTACK_VM,       // unwind using HotSpot VMStructs
     CSTACK_VMX,      // same as CSTACK_VM but with intermediate native frames
-    CSTACK_DWARF_VM  // Dwarf and vm
+    CSTACK_DWARF_VM  // uses walkDwarf for native stacks and walkVM for Java Stacks
 };
 
 enum SHORT_ENUM Clock {

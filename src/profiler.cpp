@@ -550,9 +550,12 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
         native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
-    } else if (_cstack == CSTACK_DWARF || _cstack >= CSTACK_VM) {
+    } else if (_cstack == CSTACK_DWARF || _cstack == CSTACK_DWARF_VM) {
         native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
-    } else {
+    } else if (_cstack >= CSTACK_VM) {
+        return 0;
+    }
+    else {
         native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     }
 
@@ -925,11 +928,11 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
 
     else {
         if (_cstack == CSTACK_VMX) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT);
+            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT, _cstack == CSTACK_DWARF_VM);
         } else if (event_type <= WALL_CLOCK_SAMPLE) {
             // Async events
             if (_cstack == CSTACK_VM) {
-                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL, _cstack == CSTACK_DWARF_VM);
             } else {
                 // When using CSTACK_DWARF we use this and it works
                 int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
@@ -944,7 +947,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
             VMThread *vm_thread;
             if (VMStructs::hasStackStructs() && (vm_thread = VMThread::current()) != NULL) {
-                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor());
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor(), _cstack == CSTACK_DWARF_VM);
             } else {
                 num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
             }
