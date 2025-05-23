@@ -928,10 +928,10 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
 
     else {
         if (_cstack == CSTACK_VMX) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT, _cstack == CSTACK_DWARF_VM);
+            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT, false);
         } else if (event_type <= WALL_CLOCK_SAMPLE) {
             // Async events
-            if (_cstack == CSTACK_VM) {
+            if (_cstack == CSTACK_VM || _cstack == CSTACK_DWARF_VM) {
                 num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL, _cstack == CSTACK_DWARF_VM);
             } else {
                 // When using CSTACK_DWARF we use this and it works
