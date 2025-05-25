@@ -6,17 +6,15 @@ else ifneq ($(COMMIT_TAG),)
   PROFILER_VERSION := $(PROFILER_VERSION)-$(COMMIT_TAG)
 endif
 
-COMMA=,
 PACKAGE_NAME=async-profiler-$(PROFILER_VERSION)-$(OS_TAG)-$(ARCH_TAG)
 PACKAGE_DIR=/tmp/$(PACKAGE_NAME)
-DEBUG_PACKAGE_NAME=$(PACKAGE_NAME)-debug
-DEBUG_PACKAGE_DIR=$(PACKAGE_DIR)-debug
+
+LIB?=lib
+OPT?=-O3
 
 ASPROF=bin/asprof
 JFRCONV=bin/jfrconv
-LIB_PROFILER=lib/libasyncProfiler.$(SOEXT)
-LIB_PROFILER_DEBUG=libasyncProfiler.$(SOEXT).debug
-ASPROF_HEADER=include/asprof.h
+LIB_PROFILER=$(LIB)/libasyncProfiler.$(SOEXT)
 API_JAR=jar/async-profiler.jar
 CONVERTER_JAR=jar/jfr-converter.jar
 TEST_JAR=test.jar
@@ -24,24 +22,22 @@ TEST_JAR=test.jar
 CC ?= gcc
 CXX ?= g++
 STRIP ?= strip
-OBJCOPY ?= objcopy
 
 ifneq ($(CROSS_COMPILE),)
 CC := $(CROSS_COMPILE)gcc
 CXX := $(CROSS_COMPILE)g++
 STRIP := $(CROSS_COMPILE)strip
-OBJCOPY := $(CROSS_COMPILE)objcopy
 endif
 
 CFLAGS_EXTRA ?=
 CXXFLAGS_EXTRA ?=
-CFLAGS=-O3 -fno-exceptions $(CFLAGS_EXTRA)
-CXXFLAGS=-O3 -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden -std=c++11 $(CXXFLAGS_EXTRA)
+CFLAGS=$(OPT) -fno-exceptions $(CFLAGS_EXTRA)
+CXXFLAGS=$(OPT) -fno-exceptions -fno-omit-frame-pointer -fvisibility=hidden
 CPPFLAGS=
 DEFS=-DPROFILER_VERSION=\"$(PROFILER_VERSION)\"
 INCLUDES=-I$(JAVA_HOME)/include -Isrc/helper
-LIBS=-ldl -lpthread
-MERGE=true
+LIBS=-ldl -lpthread -lz
+MERGE=false
 GCOV ?= gcov
 
 JAVAC=$(JAVA_HOME)/bin/javac
@@ -54,18 +50,19 @@ TEST_LIB_DIR=build/test/lib
 TEST_BIN_DIR=build/test/bin
 LOG_DIR=build/test/logs
 LOG_LEVEL=
-SKIP=
-TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip='$(subst $(COMMA), ,$(SKIP))'
+SKIP?=
+TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip=$(SKIP)
 
 # always sort SOURCES so zInit is last.
-SOURCES := $(sort $(wildcard src/*.cpp))
+SOURCES := $(sort $(wildcard src/*.cpp)) src/zlib/gzlog.c
 HEADERS := $(wildcard src/*.h)
 RESOURCES := $(wildcard src/res/*)
-JAVA_HELPER_CLASSES := $(wildcard src/helper/one/profiler/*.class)
+JAVA_HELPER_SOURCE := $(wildcard src/helper/one/profiler/*.java)
+JAVA_HELPER_CLASSES := $(JAVA_HELPER_SOURCE:.java=.class)
 API_SOURCES := $(wildcard src/api/one/profiler/*.java)
 CONVERTER_SOURCES := $(shell find src/converter -name '*.java')
 TEST_SOURCES := $(shell find test -name '*.java')
-TESTS ?=
+TESTS ?= $(notdir $(patsubst %/,%,$(wildcard test/test/*/)))
 CPP_TEST_SOURCES := test/native/testRunner.cpp $(shell find test/native -name '*Test.cpp')
 CPP_TEST_HEADER := test/native/testRunner.hpp
 CPP_TEST_INCLUDES := -Isrc -Itest/native
@@ -89,7 +86,7 @@ ifeq ($(OS),Darwin)
     MERGE=false
   endif
 else
-  CXXFLAGS += -U_FORTIFY_SOURCE -Wl,-z,defs -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc -fdata-sections -ffunction-sections -Wl,--gc-sections -ggdb
+  CXXFLAGS += -U_FORTIFY_SOURCE -Wl,-z,defs -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc -fdata-sections -ffunction-sections -Wl,--gc-sections
   ifeq ($(MERGE),true)
     CXXFLAGS += -fwhole-program
   endif
@@ -133,7 +130,14 @@ endif
 
 .PHONY: all jar release build-test test clean coverage clean-coverage build-test-java build-test-cpp build-test-libs build-test-bins test-cpp test-java check-md format-md
 
-all: build/bin build/lib build/$(LIB_PROFILER) build/$(ASPROF) jar build/$(JFRCONV) build/$(ASPROF_HEADER)
+all: build/bin build/$(LIB) build/$(LIB_PROFILER) build/$(ASPROF) jar build/$(JFRCONV)
+
+library: build/$(LIB) build/$(LIB_PROFILER)
+
+debug: FORCE
+	LIB=lib-g OPT=-g make library
+
+FORCE:
 
 jar: build/jar build/$(API_JAR) build/$(CONVERTER_JAR)
 
@@ -143,9 +147,6 @@ $(PACKAGE_NAME).tar.gz: $(PACKAGE_DIR)
 	patchelf --remove-needed ld-linux-x86-64.so.2 --remove-needed ld-linux-aarch64.so.1 $(PACKAGE_DIR)/$(LIB_PROFILER)
 	tar czf $@ -C $(PACKAGE_DIR)/.. $(PACKAGE_NAME)
 	rm -r $(PACKAGE_DIR)
-
-	tar czf $(DEBUG_PACKAGE_NAME).tar.gz -C $(DEBUG_PACKAGE_DIR)/.. $(DEBUG_PACKAGE_NAME)
-	rm -r $(DEBUG_PACKAGE_DIR)
 
 $(PACKAGE_NAME).zip: $(PACKAGE_DIR)
 	truncate -cs -`stat -f "%z" build/$(CONVERTER_JAR)` $(PACKAGE_DIR)/$(JFRCONV)
@@ -157,18 +158,10 @@ endif
 	rm -r $(PACKAGE_DIR)
 
 $(PACKAGE_DIR): all LICENSE README.md
-	rm -rf $@
-	mkdir -p $(PACKAGE_DIR) $(DEBUG_PACKAGE_DIR)
-	cp -RP build/bin build/lib build/include LICENSE README.md $(PACKAGE_DIR)/
+	mkdir -p $(PACKAGE_DIR)
+	cp -RP build/bin build/$(LIB) LICENSE README.md $(PACKAGE_DIR)/
 	chmod -R 755 $(PACKAGE_DIR)
-	chmod 644 $(PACKAGE_DIR)/lib/* $(PACKAGE_DIR)/include/* $(PACKAGE_DIR)/LICENSE $(PACKAGE_DIR)/README.md
-
-ifeq ($(OS_TAG),linux)
-	$(STRIP) --only-keep-debug build/$(LIB_PROFILER) -o $(DEBUG_PACKAGE_DIR)/$(LIB_PROFILER_DEBUG)
-	$(STRIP) -g $@/$(LIB_PROFILER)
-	$(OBJCOPY) --add-gnu-debuglink=$(DEBUG_PACKAGE_DIR)/$(LIB_PROFILER_DEBUG) $@/$(LIB_PROFILER)
-	chmod 644 $(DEBUG_PACKAGE_DIR)/*
-endif
+	chmod 644 $(PACKAGE_DIR)/$(LIB)/* $(PACKAGE_DIR)/LICENSE $(PACKAGE_DIR)/README.md
 
 build/%:
 	mkdir -p $@
@@ -189,10 +182,6 @@ ifeq ($(MERGE),true)
 else
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEFS) $(INCLUDES) -fPIC -shared -o $@ $(SOURCES) $(LIBS)
 endif
-
-build/$(ASPROF_HEADER): src/asprof.h
-	mkdir -p build/include
-	cp -f $< build/include
 
 build/$(API_JAR): $(API_SOURCES)
 	mkdir -p build/api
@@ -226,17 +215,14 @@ build-test: build-test-cpp build-test-java
 
 build-test-libs:
 	@mkdir -p $(TEST_LIB_DIR)
+
+ifeq ($(OS_TAG),linux)
 	$(CC) -shared -fPIC -o $(TEST_LIB_DIR)/libreladyn.$(SOEXT) test/native/libs/reladyn.c
 	$(CC) -shared -fPIC -o $(TEST_LIB_DIR)/libcallsmalloc.$(SOEXT) test/native/libs/callsmalloc.c
 	$(CC) -shared -fPIC $(INCLUDES) -Isrc -o $(TEST_LIB_DIR)/libjnimalloc.$(SOEXT) test/native/libs/jnimalloc.c
-	$(CC) -shared -fPIC -o $(TEST_LIB_DIR)/libmalloc.$(SOEXT) test/native/libs/malloc.c
 
-ifeq ($(OS_TAG),linux)
 	$(CC) -c -shared -fPIC -o $(TEST_LIB_DIR)/vaddrdif.o test/native/libs/vaddrdif.c
 	$(LD) -N -shared -o $(TEST_LIB_DIR)/libvaddrdif.$(SOEXT) $(TEST_LIB_DIR)/vaddrdif.o -T test/native/libs/vaddrdif.ld
-
-	$(AS) -o $(TEST_LIB_DIR)/multiplematching.o test/native/libs/multiplematching.s
-	$(LD) -shared -o $(TEST_LIB_DIR)/multiplematching.$(SOEXT) $(TEST_LIB_DIR)/multiplematching.o
 
 	$(AS) -o $(TEST_LIB_DIR)/twiceatzero.o test/native/libs/twiceatzero.s
 	$(LD) -shared -o $(TEST_LIB_DIR)/libtwiceatzero.$(SOEXT) $(TEST_LIB_DIR)/twiceatzero.o --section-start=.seg1=0x4000 -z max-page-size=0x1000
@@ -244,11 +230,9 @@ endif
 
 build-test-bins:
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $(TEST_BIN_DIR)/malloc_plt_dyn test/test/nativemem/malloc_plt_dyn.c
-	$(CC) -o $(TEST_BIN_DIR)/native_api -Isrc test/test/c/native_api.c -ldl
-	$(CC) -o $(TEST_BIN_DIR)/profile_with_dlopen -Isrc test/test/nativemem/profile_with_dlopen.c -ldl
-	$(CC) -o $(TEST_BIN_DIR)/preload_malloc -Isrc test/test/nativemem/preload_malloc.c -ldl
-	$(CC) -o $(TEST_BIN_DIR)/nativemem_known_lib_crash -Isrc test/test/nativemem/nativemem_known_lib_crash.c -ldl
+	gcc -o $(TEST_BIN_DIR)/malloc_plt_dyn test/test/nativemem/malloc_plt_dyn.c
+	gcc -o $(TEST_BIN_DIR)/native_api -Isrc test/test/c/native_api.c -ldl
+	gcc -o $(TEST_BIN_DIR)/profile_with_dlopen -Isrc test/test/nativemem/profile_with_dlopen.c -ldl
 	$(CXX) -o $(TEST_BIN_DIR)/non_java_app $(INCLUDES) $(CPP_TEST_INCLUDES) test/test/nonjava/non_java_app.cpp $(LIBS)
 
 test-cpp: build-test-cpp
@@ -257,7 +241,7 @@ test-cpp: build-test-cpp
 
 test-java: build-test-java
 	echo "Running tests against $(LIB_PROFILER)"
-	$(JAVA) "-Djava.library.path=$(TEST_LIB_DIR)" $(TEST_FLAGS) -ea -cp "build/test.jar:build/jar/*:build/lib/*" one.profiler.test.Runner $(subst $(COMMA), ,$(TESTS))
+	$(JAVA) "-Djava.library.path=$(TEST_LIB_DIR)" $(TEST_FLAGS) -ea -cp "build/test.jar:build/jar/*:build/$(LIB)/*" one.profiler.test.Runner $(TESTS)
 
 coverage: override FAT_BINARY=false
 coverage: clean-coverage
@@ -284,3 +268,4 @@ clean-coverage:
 
 clean:
 	$(RM) -r build
+	find . -name '*.class' -delete

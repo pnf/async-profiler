@@ -96,8 +96,7 @@ static bool isOpenJ9JvmtiAlloc(const char* blob_name) {
 }
 
 static bool isCompilerEntry(const char* blob_name) {
-    return strncmp(blob_name, "_ZN8Compiler14compile_method", 28) == 0 ||
-           strncmp(blob_name, "_ZN10C2Compiler14compile_method", 31) == 0;
+    return strncmp(blob_name, "_ZN13CompileBroker25invoke_compiler_on_method", 45) == 0;
 }
 
 static void* resolveMethodId(void** mid) {
@@ -131,6 +130,26 @@ bool VM::hasJvmThreads() {
     }
 
     return threads_found == 3;
+}
+
+// MS: Allow marking specific native methods as unsafe and therefore preventing java stack walking when present.
+static bool isUnsafe(const char* name) {
+    return (strcmp(name, "update_get_addr") == 0) ||
+            (strcmp(name, "_dl_resize_dtv") == 0) ||
+            (strcmp(name, "_dl_update_slotinfo") == 0) ||
+            (strcmp(name, "__tls_get_addr") == 0) ||
+            (strcmp(name, "__tls_get_addr_slow") == 0) ||
+            (strncmp(name,"je_arena", 8) == 0) ||
+            (strncmp(name,"je_tcache", 9) == 0) ||
+           (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
+}
+
+void VM::markUnsafeFunctions() {
+    CodeCacheArray* native_libs = Profiler::instance()->nativeLibs();
+    const int native_lib_count = native_libs->count();
+    for (int i=0; i < native_lib_count; i++) {
+        (*native_libs)[i]->mark(isUnsafe, MARK_UNSAFE);
+    }
 }
 
 bool VM::init(JavaVM* vm, bool attach) {
@@ -298,6 +317,8 @@ bool VM::init(JavaVM* vm, bool attach) {
         _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_INIT, NULL);
     }
 
+    markUnsafeFunctions();  // MS
+
     return true;
 }
 
@@ -355,10 +376,10 @@ void VM::applyPatch(char* func, const char* patch, const char* end_patch) {
     uintptr_t start_page = (uintptr_t)func & ~OS::page_mask;
     uintptr_t end_page = ((uintptr_t)func + size + OS::page_mask) & ~OS::page_mask;
 
-    if (OS::mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+    if (mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
         memcpy(func, patch, size);
         __builtin___clear_cache(func, func + size);
-        OS::mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_EXEC);
+        mprotect((void*)start_page, end_page - start_page, PROT_READ | PROT_EXEC);
     }
 }
 
@@ -419,7 +440,10 @@ void JNICALL VM::VMInit(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
 }
 
 void JNICALL VM::VMDeath(jvmtiEnv* jvmti, JNIEnv* jni) {
-    Profiler::instance()->shutdown(_global_args);
+    if (Profiler::globalFlags & GF_NO_SHUTDOWN)
+        Log::debug("VMDeath shutdown suppressed");
+    else
+       Profiler::instance()->shutdown(_global_args);
 }
 
 jvmtiError VM::RedefineClassesHook(jvmtiEnv* jvmti, jint class_count, const jvmtiClassDefinition* class_definitions) {

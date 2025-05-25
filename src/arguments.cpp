@@ -11,7 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "arguments.h"
-#include "os.h"
+#include "profiler.h"
 
 
 // Arguments of the last start/resume command; reused for shutdown and restart
@@ -94,7 +94,6 @@ static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'
 //     alluser          - include only user-mode events
 //     fdtransfer       - use fdtransfer to pass fds to the profiler
 //     target-cpu=CPU   - sample threads on a specific CPU (perf_events only, default: -1)
-//     record-cpu       - record which cpu a sample was taken on
 //     simple           - simple class names instead of FQN
 //     dot              - dotted class names
 //     norm             - normalize names of hidden classes / lambdas
@@ -107,7 +106,6 @@ static const Multiplier UNIVERSAL[] = {{'n', 1}, {'u', 1000}, {'m', 1000000}, {'
 //     begin=FUNCTION   - begin profiling when FUNCTION is executed
 //     end=FUNCTION     - end profiling when FUNCTION is executed
 //     nostop           - do not stop profiling outside --begin/--end window
-//     ttsp             - only time-to-safepoint profiling
 //     title=TITLE      - FlameGraph title
 //     minwidth=PCT     - FlameGraph minimum frame width in percent
 //     reverse          - generate stack-reversed FlameGraph / Call tree (defaults to icicle graph)
@@ -226,7 +224,7 @@ Error Arguments::parse(const char* args) {
                     if (_nativemem < 0) _nativemem = 0;
                 } else if (strcmp(value, EVENT_LOCK) == 0) {
                     if (_lock < 0) _lock = DEFAULT_LOCK_INTERVAL;
-                } else if (_event != NULL && !_all) {
+                } else if (_event != NULL) {
                     msg = "Duplicate event argument";
                 } else {
                     _event = value;
@@ -253,7 +251,7 @@ Error Arguments::parse(const char* args) {
                 _nofree = true;
 
             CASE("lock")
-                _lock = value == NULL ? DEFAULT_LOCK_INTERVAL : parseUnits(value, NANOS);
+                _lock = value == NULL ? 0 : parseUnits(value, NANOS);
 
             CASE("wall")
                 _wall = value == NULL ? 0 : parseUnits(value, NANOS);
@@ -262,25 +260,6 @@ Error Arguments::parse(const char* args) {
                 if (_event != NULL) {
                     msg = "Duplicate event argument";
                 } else {
-                    _event = EVENT_CPU;
-                }
-
-            CASE("all")
-                _all = true;
-                _live = true;
-                if (_wall < 0) {
-                    _wall = 0;
-                }
-                if (_alloc < 0) {
-                    _alloc = 0;
-                }
-                if (_lock < 0) {
-                    _lock = DEFAULT_LOCK_INTERVAL;
-                }
-                if (_nativemem < 0) {
-                    _nativemem = DEFAULT_ALLOC_INTERVAL;
-                }
-                if (_event == NULL && OS::isLinux()) {
                     _event = EVENT_CPU;
                 }
 
@@ -370,9 +349,6 @@ Error Arguments::parse(const char* args) {
 
             CASE("sched")
                 _sched = true;
-            
-            CASE("record-cpu")
-                _record_cpu = true;
 
             CASE("live")
                 _live = true;
@@ -445,13 +421,6 @@ Error Arguments::parse(const char* args) {
             CASE("nostop")
                 _nostop = true;
 
-            CASE("ttsp")
-                if (_begin != NULL || _end != NULL) {
-                    msg = "begin and end must both be empty when ttsp is set";
-                }
-                _begin = "SafepointSynchronize::begin";
-                _end = "RuntimeService::record_safepoint_synchronized";
-
             // FlameGraph options
             CASE("title")
                 _title = value;
@@ -464,6 +433,45 @@ Error Arguments::parse(const char* args) {
 
             CASE("inverted")
                 _inverted = true;
+
+            // MS custom commands
+
+            // Add event-type frames like "[custom=Alloc]" so we can publish multiple event types without jfr.
+            CASE("etypeframes")
+                _eventtypeframes = true;
+            // Live allocation tracking persists across resets
+            CASE("persist")
+                _persist = true;
+            // When publishing folded stacks, first occurrence of the frame foo is published as
+            // 123=foo, and subsequently as 123
+            CASE("memoframes")
+                _memoizeframes = true;
+            // Sample native memory allocation using jemalloc hooks
+            CASE("jemalloc")
+                _jemalloc = true;
+            // set shared memory context file name
+            CASE("shmcontext")
+                if(value == NULL || value[0] == 0)
+                    msg = "Shared memory context may not be empty";
+                else
+                    Profiler::instance()->setExternalContext(0, value);
+            // Set permanent/global flag bitmap
+            CASE("globals")
+                Profiler::globalFlags = value == NULL ? GF_NONE : (GlobalFlags) atoi(value);
+                Log::info("Setting global flags to %d\n", Profiler::globalFlags);
+            // Dump output will be written to a temp file and then moved atomically to final destination
+            CASE("atomicfile")
+                if (value == NULL || value[0] == 0)
+                    msg = "atomicfile suffix must not be empty";
+                else
+                   _atomicfile = value;
+
+            // Permanently turn off jemalloc sampling, including frees.
+            CASE("stop_native")  // keep old command around for a release or two
+                _action = ACTION_STOP_JEMALLOC;
+
+            CASE("stopjemalloc")
+                _action = ACTION_STOP_JEMALLOC;
 
             DEFAULT()
                 if (_unknown_arg == NULL) _unknown_arg = arg;

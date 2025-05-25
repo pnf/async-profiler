@@ -62,7 +62,12 @@ class JitWriteProtection {
 
 
 class OS {
+    volatile static u64 allocated;  // MS: track internal memory use
+    volatile static u64 freed;      // MS: track internal memory use
+
   public:
+    static long getAllocated();     // MS: track internal memory use
+
     static const size_t page_size;
     static const size_t page_mask;
 
@@ -103,7 +108,6 @@ class OS {
     static int createMemoryFile(const char* name);
     static void copyFile(int src_fd, int dst_fd, off_t offset, size_t size);
     static void freePageCache(int fd, off_t start_offset);
-    static int mprotect(void* addr, size_t size, int prot);
 };
 
 #endif // _OS_H

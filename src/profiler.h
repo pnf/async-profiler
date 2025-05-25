@@ -24,12 +24,12 @@
 #include "trap.h"
 #include "vmEntry.h"
 #include "writer.h"
+#include "queue/blockingconcurrentqueue.h"
 
 
 const int MAX_NATIVE_FRAMES = 128;
 const int RESERVED_FRAMES   = 10;  // for synthetic frames
 const int CONCURRENCY_LEVEL = 16;
-
 
 union CallTraceBuffer {
     ASGCT_CallFrame _asgct_frames[1];
@@ -48,6 +48,75 @@ enum State {
     TERMINATED
 };
 
+enum AwaitFrameType {
+  AW_METHOD =1,
+  AW_STRING =2
+};
+
+// Iterates over frames with (potentially) inserted await stacks
+class FrameIterator {
+private:
+  static const int MAX_DEPTH = 5;
+  CallTrace* traceStack[MAX_DEPTH];
+  int positionStack[MAX_DEPTH];
+  std::map<jmethodID, CallTrace*> awaitTraces;
+  int depth = 0;
+  int i = 0;
+  bool hasAwaits = false;
+  void addAwaitTrace(CallTrace* trace) {
+    if(trace->frames[0].bci == BCI_AWAIT_MARKER) {
+        awaitTraces[trace->frames[0].method_id] = trace;
+        hasAwaits = true;
+    }
+  }
+public:
+  FrameIterator(std::vector<CallTraceSample*> &samples, bool savedAwaitStacks);
+    FrameIterator(std::vector<CallTraceSample> &samples, bool savedAwaitStacks);
+    FrameIterator(std::map<long long unsigned int, CallTraceSample> &samples, bool savedAwaitStacks);
+  void set(CallTrace* trace_, bool reversed, int ignore_last = 0);
+  int setAndCount(CallTrace* trace_, bool reversed, int ignore_last = 0);
+  ASGCT_CallFrame* prev();
+  ASGCT_CallFrame* next();
+};
+
+static const int MAX_AWAIT_STACKS = 10;
+
+struct AwaitData;
+struct Deferred {
+    ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]; // frames captured from signal callback
+    volatile AwaitData* awaitData;               // await data for captured thread
+    jthread thread;
+    u64 counter;
+    EventType event_type;
+    Event event;
+    int first_java_frame;
+    int num_frames;
+};
+
+typedef moodycamel::BlockingConcurrentQueue<Deferred>::producer_token_t producer_token_t;
+
+struct AwaitData {
+    // The order of fields is important if getAwaitDataAddress() is used.
+    // When sampling occurs, we will search for a method_id == insertionId.
+    // Starting from the innermost frame, we replace matching ids with successive
+    // elements of stackId.
+    // And we put the value sampledSignalToSet into sampledSignal
+    long insertionId;
+    long sampledSignalToSet;
+    long sampledSignal;
+    long stackId[MAX_AWAIT_STACKS+1];
+    // os thread-local data:
+    long mounted_vthread_id;
+    jthread mounted_vthread;
+    producer_token_t* producer_token;
+};
+
+enum GlobalFlags {
+    GF_NONE = 0,
+    GF_NO_SHUTDOWN = 1
+};
+
+
 class Profiler {
   private:
     Mutex _state_lock;
@@ -59,6 +128,8 @@ class Profiler {
     // TODO: single map?
     std::map<int, std::string> _thread_names;
     std::map<int, jlong> _thread_ids;
+    Mutex _contexts_lock;
+    std::map<std::string, long*> _contexts;
     Dictionary _class_map;
     Dictionary _symbol_map;
     ThreadFilter _thread_filter;
@@ -67,6 +138,8 @@ class Profiler {
     Engine* _engine;
     Engine* _alloc_engine;
     int _event_mask;
+    bool _eventtypeframes;
+    bool _persist;
 
     time_t _start_time;
     time_t _stop_time;
@@ -87,7 +160,6 @@ class Profiler {
     bool _add_event_frame;
     bool _add_thread_frame;
     bool _add_sched_frame;
-    bool _add_cpu_frame;
     bool _update_thread_names;
     volatile jvmtiEventMode _thread_events_state;
 
@@ -115,9 +187,9 @@ class Profiler {
     const char* asgctError(int code);
     u32 getLockIndex(int tid);
     jmethodID getCurrentCompileTask();
-    int getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx);
+    int getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType event_type, int tid, StackContext* java_ctx, const char** unsafe);
     int getJavaTraceAsync(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackContext* java_ctx);
-    int getJavaTraceJvmti(jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
+    int getJavaTraceJvmti(jthread othread, jvmtiFrameInfo* jvmti_frames, ASGCT_CallFrame* frames, int start_depth, int max_depth);
     void fillFrameTypes(ASGCT_CallFrame* frames, int num_frames, NMethod* nmethod);
     void setThreadInfo(int tid, const char* name, jlong java_thread_id);
     void updateThreadName(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);
@@ -126,7 +198,7 @@ class Profiler {
     bool excludeTrace(FrameName* fn, CallTrace* trace);
     void mangle(const char* name, char* buf, size_t size);
     Engine* selectEngine(const char* event_name);
-    Engine* selectAllocEngine(long alloc_interval, bool live);
+    Engine* selectAllocEngine(Arguments& args);
     Engine* activeEngine();
     Error checkJvmCapabilities();
 
@@ -153,6 +225,15 @@ class Profiler {
     void dumpFlameGraph(Writer& out, Arguments& args, bool tree);
     void dumpText(Writer& out, Arguments& args);
 
+    int bail(int tid, EventType event_type, int lock_index);
+
+    volatile bool _savedAwaitStacks = false;
+    volatile AwaitData* _vtAwaitData;
+    int _vtSlots;
+    moodycamel::BlockingConcurrentQueue<Deferred> _dq;
+    CallTraceBuffer* _deferred_buf;
+    u32* _deferred_pos;
+    volatile bool _recording_deferred;
     static Profiler* const _instance;
 
   public:
@@ -174,16 +255,35 @@ class Profiler {
         _native_libs(),
         _call_stub_begin(NULL),
         _call_stub_end(NULL),
-        _dlopen_entry(NULL) {
+        _dlopen_entry(NULL),
+        _vtAwaitData(NULL),
+        _vtSlots(0),
+        _dq(moodycamel::ConcurrentQueueDefaultTraits::BLOCK_SIZE * CONCURRENCY_LEVEL * 2),
+        _recording_deferred(false),
+        _deferred_buf(NULL),
+        _deferred_pos(NULL)
+        {
 
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
             _calltrace_buffer[i] = NULL;
         }
     }
 
+    volatile static GlobalFlags globalFlags;
+
     static Profiler* instance() {
         return _instance;
     }
+
+    bool savedAwaitStacks() {
+      return _savedAwaitStacks;
+    }
+
+    AwaitData* threadLocalAwaitData(bool may_init);
+    volatile AwaitData* awaitData(bool may_init = false);
+    int initAwaitData(int slots);
+    long saveAwaitFrames(AwaitFrameType,long*,int);
+    void setExternalContext(long ctx, const char* shmpath);
 
     u64 total_samples() { return _total_samples; }
     long uptime()       { return time(NULL) - _start_time; }
@@ -199,16 +299,23 @@ class Profiler {
     Error check(Arguments& args);
     Error start(Arguments& args, bool reset);
     Error stop(bool restart = false);
+    void stop_jemalloc();
     Error flushJfr();
     Error dump(Writer& out, Arguments& args);
     void printUsedMemory(Writer& out);
     void logStats();
     void switchThreadEvents(jvmtiEventMode mode);
-    int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type);
-    u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event);
+    int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type, const char ** unsafe);
+    u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp = NULL, Deferred* deferred = NULL);
+    void recordExternalSample(u64 counter, const char* custom, const char* error, u64 sidref);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
+    void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
+    void recordDeferred(int n, long ms);
     void recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event);
+    void recordExternalSample(u64 counter, EventType event_type, Event* event, long trace);
     void recordEventOnly(EventType event_type, Event* event);
+    u64 recordCustom(int offset, double value, const char* info, u64 counter);
+    void addCustomEventType(int offset, const char* name);
     void tryResetCounters();
     void writeLog(LogLevel level, const char* message);
     void writeLog(LogLevel level, const char* message, size_t len);

@@ -42,6 +42,7 @@ enum Mark {
     MARK_INTERPRETER = 2,
     MARK_COMPILER_ENTRY = 3,
     MARK_ASYNC_PROFILER = 4, // async-profiler internals such as native hooks.
+    MARK_UNSAFE = 5  // MS - native methods in stack that might make java stack walking unsafe
 };
 
 
@@ -107,7 +108,6 @@ class CodeCache {
     const void* _min_address;
     const void* _max_address;
     const char* _text_base;
-    const char* _image_base;
 
     unsigned int _plt_offset;
     unsigned int _plt_size;
@@ -124,15 +124,15 @@ class CodeCache {
     CodeBlob* _blobs;
 
     void expand();
-    bool makeImportsPatchable();
+    void makeImportsPatchable();
     void saveImport(ImportId id, void** entry);
 
   public:
     CodeCache(const char* name,
               short lib_index = -1,
+              bool imports_patchable = false,
               const void* min_address = NO_MIN_ADDRESS,
-              const void* max_address = NO_MAX_ADDRESS,
-              const char* image_base = NULL);
+              const void* max_address = NO_MAX_ADDRESS);
 
     ~CodeCache();
 
@@ -146,10 +146,6 @@ class CodeCache {
 
     const void* maxAddress() const {
         return _max_address;
-    }
-
-    const char* imageBase() const {
-        return _image_base;
     }
 
     bool contains(const void* address) const {
@@ -207,8 +203,6 @@ class CodeCache {
     FrameDesc* findFrameDesc(const void* pc);
 
     size_t usedMemory();
-
-    friend class UnloadProtection;
 };
 
 

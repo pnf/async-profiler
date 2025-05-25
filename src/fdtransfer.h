@@ -17,8 +17,6 @@
 
 #define RESTARTABLE(call)  ({ ssize_t ret; while ((ret = call) < 0 && errno == EINTR); ret; })
 
-#define MAX_PROBE_LEN  256
-
 
 // base header for all requests
 enum request_type {
@@ -36,7 +34,6 @@ struct perf_fd_request {
     int tid;
     int target_cpu;
     struct perf_event_attr attr;
-    char probe_name[MAX_PROBE_LEN];
 };
 
 struct fd_response {

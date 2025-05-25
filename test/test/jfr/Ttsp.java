@@ -6,53 +6,41 @@
 package test.jfr;
 
 import java.lang.management.ManagementFactory;
-import java.lang.reflect.Field;
-import sun.misc.Unsafe;
+import java.util.Arrays;
 
 public class Ttsp {
-    private static final long RUN_DURATION_MS = 3_000;
-    private static final long SAFEPOINT_INTERVAL_MS = 200;
-    private static final long MEMORY_SIZE = 500 * 1024 * 1024;
+    static volatile int sink;
+
+    // String.indexOf is a JVM intrinsic. When JIT-compiled, it has no safepoint check inside
+    // and therefore may delay safepoint start.
+    static int indexOfTest(int length) {
+        char[] chars = new char[length * length];
+        Arrays.fill(chars, 'a');
+        String haystack = new String(chars);
+        String needle = haystack.substring(0, length) + 'b' + haystack.substring(0, length);
+        return haystack.indexOf(needle);
+    }
+
+    static void spoiler(int length, long count) {
+        for (long i = 0; i < count; i++) {
+            sink = indexOfTest(length);
+        }
+    }
 
     static void requestSafepoint() {
         ManagementFactory.getThreadMXBean().dumpAllThreads(false, false);
     }
 
-    static Unsafe getUnsafe() {
-        try {
-            Field f = Unsafe.class.getDeclaredField("theUnsafe");
-            f.setAccessible(true);
-            return (Unsafe) f.get(null);
-        } catch (Exception exception) {
-            throw new RuntimeException(exception);
-        }
-    }
-
-    static void delaySafepoint() {
-        Unsafe unsafe = getUnsafe();
-        long address = unsafe.allocateMemory(MEMORY_SIZE);
-
-        long value = 0;
-        while (!Thread.interrupted()) {
-            unsafe.setMemory(address, MEMORY_SIZE, (byte) (value++ % Byte.MAX_VALUE + 1));
-        }
-
-        unsafe.freeMemory(address);
-    }
-
     public static void main(String[] args) throws Exception {
-        long start = System.nanoTime();
-        long end = start + RUN_DURATION_MS * 1_000_000;
+        // Warmup with small input to force JIT-compilation of indexOfTest
+        spoiler(10, 1000000);
 
-        Thread safepointerDelayerThread = new Thread(Ttsp::delaySafepoint);
-        safepointerDelayerThread.start();
+        // Run actual workload with large input to cause long time-to-safepoint pauses
+        new Thread(() -> spoiler(1000, Long.MAX_VALUE)).start();
 
-        while (System.nanoTime() < end) {
+        while (true) {
             requestSafepoint();
-            Thread.sleep(SAFEPOINT_INTERVAL_MS);
+            Thread.sleep(200);
         }
-
-        safepointerDelayerThread.interrupt();
-        safepointerDelayerThread.join();
     }
 }

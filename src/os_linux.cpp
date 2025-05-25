@@ -265,7 +265,6 @@ SigAction OS::replaceCrashHandler(SigAction action) {
     sigaction(SIGSEGV, NULL, &sa);
     SigAction old_action = sa.sa_sigaction;
     sa.sa_sigaction = action;
-    sa.sa_flags |= SA_SIGINFO | SA_RESTART;
     sigaction(SIGSEGV, &sa, NULL);
     return old_action;
 }
@@ -292,6 +291,14 @@ int OS::getProfilingSignal(int mode) {
     return signo;
 }
 
+volatile u64 OS::allocated = 0;  // MS
+volatile u64 OS::freed = 0;  // MS
+
+// MS
+long OS::getAllocated() {
+    return (long) allocated - (long) freed;
+}
+
 bool OS::sendSignalToThread(int thread_id, int signo) {
     return syscall(__NR_tgkill, processId(), thread_id, signo) == 0;
 }
@@ -303,11 +310,13 @@ void* OS::safeAlloc(size_t size) {
     if (result < 0 && result > -4096) {
         return NULL;
     }
+    atomicInc(allocated, (u64) size); // MS
     return (void*)result;
 }
 
 void OS::safeFree(void* addr, size_t size) {
     syscall(__NR_munmap, addr, size);
+    atomicInc(freed, (u64) size);  // MS
 }
 
 bool OS::getCpuDescription(char* buf, size_t size) {
@@ -382,10 +391,6 @@ void OS::copyFile(int src_fd, int dst_fd, off_t offset, size_t size) {
 
 void OS::freePageCache(int fd, off_t start_offset) {
     posix_fadvise(fd, start_offset & ~page_mask, 0, POSIX_FADV_DONTNEED);
-}
-
-int OS::mprotect(void* addr, size_t size, int prot) {
-    return ::mprotect(addr, size, prot);
 }
 
 #endif // __linux__

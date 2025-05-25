@@ -65,6 +65,7 @@ enum JfrType {
     T_MALLOC = 119,
     T_FREE = 120,
     T_USER_EVENT = 121,
+    T_CUSTOM_BASE = 122,
 
     // types after T_ANNOTATION inherit from java.lang.annotation.Annotation, see JfrMetadata::type
     T_ANNOTATION = 200,
@@ -119,9 +120,11 @@ class Element {
         return *this;
     }
 
-    Element& attribute(const char* key, JfrType value) {
+    Element& attribute(const char* key, JfrType value,
+                       int idx = 0) { // MS
         char value_str[16];
-        snprintf(value_str, sizeof(value_str), "%d", value);
+        snprintf(value_str, sizeof(value_str), "%d",
+                 value + idx);  // MS
         return attribute(key, value_str);
     }
 
@@ -153,10 +156,12 @@ class JfrMetadata : Element {
         return *new Element(name);
     }
 
-    static Element& type(const char* name, JfrType id, const char* label = NULL, bool simple = false) {
+    static Element& type(const char* name, JfrType id, const char* label = NULL, bool simple = false,
+                         int idx = 0) { // MS
         Element& e = element("class");
         e.attribute("name", name);
-        e.attribute("id", id);
+        e.attribute("id", id,
+                    idx); // MS
         if (simple) {
             e.attribute("simpleType", "true");
         } else if (id > T_ANNOTATION) {
@@ -229,8 +234,31 @@ class JfrMetadata : Element {
         return e;
     }
 
+    // MS: Add a custom event to the jfr metadatq
+    static Element& custom(int i, const char* eventName, const char* label, const char* valueName) {
+        char name_str[80], label_str[80];
+        sprintf(name_str, "ap.custom.%s", eventName);
+        strcpy(label_str, label);
+
+        Element& e = (type (name_str, T_CUSTOM_BASE, label_str,false, i)
+                << category("Async Application", "Profiling")
+                << field("startTime", T_LONG, "Start Time", F_TIME_TICKS)
+                << field("eventThread", T_THREAD, "Event Thread", F_CPOOL)
+                << field("stackTrace", T_STACK_TRACE, "Stack Trace", F_CPOOL)
+                << field("info", T_STRING, "Info")
+                << field("value", T_DOUBLE, valueName));
+        return e;
+    }
+
   public:
     JfrMetadata();
+
+    // MS
+    static void addCustom(uint i, const char* event, const char*label, const char* value) {
+        Element& c = custom(i, event, label, value);
+        Element& peers = (Element&) *_root._children.front();
+        peers << c;
+    }
 
     static Element* root() {
         return &_root;

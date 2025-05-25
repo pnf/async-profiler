@@ -5,6 +5,7 @@
 
 package test.c;
 
+import one.profiler.test.Os;
 import one.profiler.test.Output;
 import one.profiler.test.Test;
 import one.profiler.test.TestProcess;

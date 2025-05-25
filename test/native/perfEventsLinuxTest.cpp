@@ -11,6 +11,8 @@
 #include <dlfcn.h>
 #include <stdio.h>
 
+#include "perfEvents_linux.h"
+
 #define ASSERT_EVENT_TYPE(event_type, name_, type_, default_interval_, config_, config1_, config2_, counter_arg_) \
     ASSERT_NE(event_type, NULL);                                                                                  \
     CHECK_EQ(event_type->name, name_);                                                                            \

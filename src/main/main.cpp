@@ -75,8 +75,6 @@ static const char USAGE_STRING[] =
     "  --nofree          do not collect free calls in native allocation profiling\n"
     "  --lock duration   lock profiling threshold in nanoseconds\n"
     "  --wall interval   wall clock profiling interval\n"
-    "  --all             shorthand for enabling cpu, wall, alloc, live,\n"
-    "                    nativemem and lock profiling simultaneously\n"
     "  --total           accumulate the total value (time, bytes, etc.)\n"
     "  --all-user        only include user-mode events\n"
     "  --sched           group threads by scheduling policy\n"
@@ -90,9 +88,9 @@ static const char USAGE_STRING[] =
     "  --jfropts opts    JFR recording options: mem\n"
     "  --jfrsync config  synchronize profiler with JFR recording\n"
     "  --libpath path    full path to libasyncProfiler.so in the container\n"
-    "  --fdtransfer      run separate fdtransfer process to serve perf requests\n"
-    "                    from the non-privileged target\n"
+    "  --fdtransfer      use fdtransfer to serve perf requests\n"
     "  --target-cpu cpu  sample threads on a specific CPU (perf_events only, default: -1)\n"
+    "                    from the non-privileged target\n"
     "\n"
     "<pid> is a numeric process ID of the target JVM\n"
     "      or 'jps' keyword to find running JVM automatically\n"
@@ -101,8 +99,7 @@ static const char USAGE_STRING[] =
     "Example: " APP_BINARY " -d 30 -f profile.html 3456\n"
     "         " APP_BINARY " start -i 1ms jps\n"
     "         " APP_BINARY " stop -o flat jps\n"
-    "         " APP_BINARY " -d 5 -e alloc MyAppName\n"
-    "         " APP_BINARY " --all -f profile.jfr MyAppName\n";
+    "         " APP_BINARY " -d 5 -e alloc MyAppName\n";
 
 
 extern "C" int jattach(int pid, int argc, const char** argv, int print_output);
@@ -497,7 +494,7 @@ int main(int argc, const char** argv) {
             format << "," << (arg.str() + 2) << "=" << args.next();
 
         } else if (arg == "--reverse" || arg == "--inverted" || arg == "--samples" || arg == "--total" ||
-                   arg == "--sched" || arg == "--live" || arg == "--nofree" || arg == "--record-cpu") {
+                   arg == "--sched" || arg == "--live" || arg == "--nofree") {
             format << "," << (arg.str() + 2);
 
         } else if (arg == "--alloc" || arg == "--nativemem" || arg == "--lock" || arg == "--wall" ||
@@ -507,13 +504,10 @@ int main(int argc, const char** argv) {
             params << "," << (arg.str() + 2) << "=" << args.next();
 
         } else if (arg == "--ttsp") {
-            params << ",ttsp";
+            params << ",begin=SafepointSynchronize::begin,end=RuntimeService::record_safepoint_synchronized";
 
         } else if (arg == "--nostop") {
             params << ",nostop";
-
-        } else if (arg == "--all") {
-            params << ",all";
 
         } else if (arg == "--all-user") {
             params << ",alluser";

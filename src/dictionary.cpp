@@ -76,10 +76,15 @@ unsigned int Dictionary::hash(const char* key, size_t length) {
 }
 
 unsigned int Dictionary::lookup(const char* key) {
-    return lookup(key, strlen(key));
+    return lookup(key, strlen(key), 0);
 }
 
 unsigned int Dictionary::lookup(const char* key, size_t length) {
+    return lookup(key, length, 0);
+}
+
+// MS: set extra bits in the index value if the entry was already present.
+unsigned int Dictionary::lookup(const char* key, size_t length, unsigned int maskIfExists) {
     DictTable* table = _table;
     unsigned int h = hash(key, length);
 
@@ -94,7 +99,7 @@ unsigned int Dictionary::lookup(const char* key, size_t length) {
                 free(new_key);
             }
             if (keyEquals(row->keys[c], key, length)) {
-                return table->index(h % ROWS, c);
+                return maskIfExists | table->index(h % ROWS, c);
             }
         }
 

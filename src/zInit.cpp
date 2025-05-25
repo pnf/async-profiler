@@ -24,8 +24,12 @@ class LateInitializer {
         }
 
         if (!checkJvmLoaded()) {
-            const char* command = getenv("ASPROF_COMMAND");
+            const char *command = getenv("ASPROF_COMMAND");
             if (command != NULL && Hooks::init(false)) {
+                // MS: prevent child processes from inheriting preload.
+                command = strdup(command);
+                unsetenv("ASPROF_COMMAND");
+                unsetenv("LD_PRELOAD");
                 startProfiler(command);
             }
         }

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "arch.h"
 #include "testRunner.hpp"
 #include "demangle.h"
 #include <stdio.h>

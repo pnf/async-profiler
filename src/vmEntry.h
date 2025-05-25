@@ -7,7 +7,7 @@
 #define _VMENTRY_H
 
 #include <jvmti.h>
-#include "arch.h"
+#include "protect.h"
 
 
 enum FrameTypeId {
@@ -25,6 +25,8 @@ enum FrameTypeId {
     FRAME_CPP          = 4,
     FRAME_KERNEL       = 5,
     FRAME_C1_COMPILED  = 6,
+    FRAME_AWAIT_S      = 7,
+    FRAME_AWAIT_J      = 8,
 };
 
 class FrameType {
@@ -50,7 +52,13 @@ enum ASGCT_CallFrameType {
     BCI_THREAD_ID           = -16,  // method_id designates a thread
     BCI_ADDRESS             = -17,  // method_id is a PC address
     BCI_ERROR               = -18,  // method_id is an error string
-    BCI_CPU                 = -19,  // method_id is the cpu the sample was taken on
+    BCI_AWAIT_S             = -30,  // method_id is frame name string
+    BCI_AWAIT_J             = -31,  // method_id is a real method, displayed as await frame
+    BCI_CUSTOM              = -32,  // A custom event
+
+    BCI_AWAIT_MARKER        = -40,  // Set at 0 to indicate await stack
+    BCI_AWAIT_INSERTION     = -41,  // An async stack should be inserted here
+    BCI_STACK_TAG           = -42
 };
 
 // See hotspot/src/share/vm/prims/forte.cpp
@@ -67,7 +75,8 @@ enum ASGCT_Failure {
     ticks_deopt                 = -9,
     ticks_safepoint             = -10,
     ticks_skipped               = -11,
-    ASGCT_FAILURE_TYPES         = 12
+    java_skipped                = -12,
+    ASGCT_FAILURE_TYPES         = 13
 };
 
 typedef struct {
@@ -134,6 +143,7 @@ class VM {
     }
 
     static JNIEnv* jni() {
+        Protect p; // Prevent sampling during possible tls initialization
         JNIEnv* jni;
         return _vm && _vm->GetEnv((void**)&jni, JNI_VERSION_1_6) == 0 ? jni : NULL;
     }
@@ -185,6 +195,8 @@ class VM {
 
     static jvmtiError JNICALL RedefineClassesHook(jvmtiEnv* jvmti, jint class_count, const jvmtiClassDefinition* class_definitions);
     static jvmtiError JNICALL RetransformClassesHook(jvmtiEnv* jvmti, jint class_count, const jclass* classes);
+
+    static void markUnsafeFunctions();
 };
 
 #endif // _VMENTRY_H

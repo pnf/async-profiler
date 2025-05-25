@@ -126,7 +126,8 @@ void J9StackTraces::timerLoop() {
                 }
             }
 
-            int num_frames = Profiler::instance()->convertNativeTrace(notif->num_frames, notif->addr, frames, EXECUTION_SAMPLE);
+            int num_frames = Profiler::instance()->convertNativeTrace(notif->num_frames, notif->addr, frames, EXECUTION_SAMPLE,
+                                                                      NULL); // MS
 
             for (int j = 0; j < num_jvmti_frames; j++) {
                 frames[num_frames].method_id = jvmti_frames[j].method;

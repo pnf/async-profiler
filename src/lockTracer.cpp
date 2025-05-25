@@ -200,6 +200,7 @@ jint JNICALL LockTracer::RegisterNativesHook(JNIEnv* env, jclass cls, const JNIN
 }
 
 void JNICALL LockTracer::UnsafeParkHook(JNIEnv* env, jobject instance, jboolean isAbsolute, jlong time) {
+    VM::jni(); // MS: force tls initialization safely.  Not clear that this helps
     while (_enabled) {
         jvmtiEnv* jvmti = VM::jvmti();
         jobject park_blocker = getParkBlocker(jvmti, env);
@@ -231,8 +232,11 @@ void JNICALL LockTracer::UnsafeParkHook(JNIEnv* env, jobject instance, jboolean 
 
 jobject LockTracer::getParkBlocker(jvmtiEnv* jvmti, JNIEnv* env) {
     jthread thread;
-    if (jvmti->GetCurrentThread(&thread) != 0) {
-        return NULL;
+    {
+        Protect p;  // MS
+        if (jvmti->GetCurrentThread(&thread) != 0) {
+            return NULL;
+        }
     }
     return env->GetObjectField(thread, _parkBlocker);
 }

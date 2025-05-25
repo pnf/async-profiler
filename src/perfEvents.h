@@ -22,7 +22,6 @@ class PerfEvents : public CpuEngine {
     static PerfEventType* _event_type;
     static bool _alluser;
     static bool _kernel_stack;
-    static bool _record_cpu;
     static int _target_cpu;
 
     static u64 readCounter(siginfo_t* siginfo, void* ucontext);

@@ -21,6 +21,7 @@ class Writer {
     Writer& operator<<(char c);
     Writer& operator<<(const char* s);
     Writer& operator<<(int n);
+    Writer& operator<<(unsigned int n); // MS
     Writer& operator<<(long n);
 
     bool good() const {
@@ -93,5 +94,19 @@ class CallbackWriter : public Writer {
 
     virtual void write(const char* data, size_t len);
 };
+
+// MS: Output file's existence is atomic
+class AtomicOutputFile : public Writer {
+private:
+    const char *_fname;
+    FileWriter *_fileWriter;
+    char *_tmpname;
+public:
+    AtomicOutputFile(Arguments &args);
+    ~AtomicOutputFile();
+    virtual void write(const char* data, size_t len);
+    bool is_open() { return _fileWriter && _fileWriter->is_open(); }
+};
+
 
 #endif // _WRITER_H

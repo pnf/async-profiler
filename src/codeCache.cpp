@@ -9,7 +9,6 @@
 #include <sys/mman.h>
 #include "codeCache.h"
 #include "dwarf.h"
-#include "log.h"
 #include "os.h"
 
 
@@ -29,22 +28,19 @@ size_t NativeFunc::usedMemory(const char* name) {
 }
 
 
-CodeCache::CodeCache(const char* name, short lib_index,
-                     const void* min_address, const void* max_address,
-                     const char* image_base) {
+CodeCache::CodeCache(const char* name, short lib_index, bool imports_patchable,
+                     const void* min_address, const void* max_address) {
     _name = NativeFunc::create(name, -1);
-
     _lib_index = lib_index;
     _min_address = min_address;
     _max_address = max_address;
     _text_base = NULL;
-    _image_base = image_base;
 
     _plt_offset = 0;
     _plt_size = 0;
 
     memset(_imports, 0, sizeof(_imports));
-    _imports_patchable = false;
+    _imports_patchable = imports_patchable;
     _debug_symbols = false;
 
     _dwarf_table = NULL;
@@ -163,19 +159,13 @@ const void* CodeCache::findSymbolByPrefix(const char* prefix) {
 }
 
 const void* CodeCache::findSymbolByPrefix(const char* prefix, int prefix_len) {
-    const void* result = NULL;
     for (int i = 0; i < _count; i++) {
         const char* blob_name = _blobs[i]._name;
         if (blob_name != NULL && strncmp(blob_name, prefix, prefix_len) == 0) {
-            result = _blobs[i]._start;
-            // Symbols which contain a dot are only patched if no alternative is found,
-            // see #1247
-            if (strchr(blob_name + prefix_len, '.') == NULL) {
-                return result;
-            }
+            return _blobs[i]._start;
         }
     }
-    return result;
+    return NULL;
 }
 
 void CodeCache::saveImport(ImportId id, void** entry) {
@@ -238,13 +228,15 @@ void CodeCache::addImport(void** entry, const char* name) {
 void** CodeCache::findImport(ImportId id) {
     if (!_imports_patchable) {
         makeImportsPatchable();
+        _imports_patchable = true;
     }
     return _imports[id][PRIMARY];
 }
 
 void CodeCache::patchImport(ImportId id, void* hook_func) {
-    if (!_imports_patchable && !makeImportsPatchable()) {
-        return;
+    if (!_imports_patchable) {
+        makeImportsPatchable();
+        _imports_patchable = true;
     }
 
     for (int ty = 0; ty < NUM_IMPORT_TYPES; ty++) {
@@ -255,7 +247,7 @@ void CodeCache::patchImport(ImportId id, void* hook_func) {
     }
 }
 
-bool CodeCache::makeImportsPatchable() {
+void CodeCache::makeImportsPatchable() {
     void** min_import = (void**)-1;
     void** max_import = NULL;
     for (int i = 0; i < NUM_IMPORTS; i++) {
@@ -270,14 +262,8 @@ bool CodeCache::makeImportsPatchable() {
     if (max_import != NULL) {
         uintptr_t patch_start = (uintptr_t)min_import & ~OS::page_mask;
         uintptr_t patch_end = (uintptr_t)max_import & ~OS::page_mask;
-        if (OS::mprotect((void*)patch_start, patch_end - patch_start + OS::page_size, PROT_READ | PROT_WRITE) != 0) {
-            Log::warn("Could not patch %s", name());
-            return false;
-        }
+        mprotect((void*)patch_start, patch_end - patch_start + OS::page_size, PROT_READ | PROT_WRITE);
     }
-
-    _imports_patchable = true;
-    return true;
 }
 
 void CodeCache::setDwarfTable(FrameDesc* table, int length) {
