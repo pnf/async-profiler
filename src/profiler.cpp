@@ -550,11 +550,12 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
         native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
+    } else if (_cstack == CSTACK_DWARF || _cstack == CSTACK_DWARF_VM) {
+        native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     } else if (_cstack >= CSTACK_VM) {
         return 0;
-    } else if (_cstack == CSTACK_DWARF) {
-        native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
-    } else {
+    }
+    else {
         native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     }
 
@@ -917,7 +918,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     }
 
     // If an unsafe frame was detected in native stack, skip java stack.
-    if (unsafe_frame) {
+    if (unsafe_frame && _cstack < CSTACK_VM) {
         long n = atomicInc(_failures[-java_skipped])+1;
         if (n==1 || ((n & (n - 1)) == 0)) {
             Log::info("Skipping unsafe %ld %s", n, unsafe_frame);
@@ -927,12 +928,13 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
 
     else {
         if (_cstack == CSTACK_VMX) {
-            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT);
+            num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT, false);
         } else if (event_type <= WALL_CLOCK_SAMPLE) {
             // Async events
-            if (_cstack == CSTACK_VM) {
-                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
+            if (_cstack == CSTACK_VM || _cstack == CSTACK_DWARF_VM) {
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL, _cstack == CSTACK_DWARF_VM);
             } else {
+                // When using CSTACK_DWARF we use this and it works
                 int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
                 if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
                     NMethod *nmethod = CodeHeap::findNMethod(java_ctx.pc);
@@ -945,7 +947,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
             VMThread *vm_thread;
             if (VMStructs::hasStackStructs() && (vm_thread = VMThread::current()) != NULL) {
-                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor());
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor(), _cstack == CSTACK_DWARF_VM);
             } else {
                 num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
             }
