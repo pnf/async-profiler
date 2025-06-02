@@ -65,7 +65,7 @@ JFR options:
     --from TIME        Start time in ms (absolute or relative)
     --to TIME          End time in ms (absolute or relative)
                        TIME can be:
-                       # an absolute timestamp specified in millis since epoch;
+                       # an absolute timestamp specified in millis since deferral_epoch;
                        # an absolute time in hh:mm:ss or yyyy-MM-dd'T'hh:mm:ss format;
                        # a relative time from the beginning of recording;
                        # a relative time from the end of recording (a negative number).

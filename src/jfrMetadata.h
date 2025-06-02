@@ -238,7 +238,7 @@ class JfrMetadata : Element {
     static Element& custom(int i, const char* eventName, const char* label, const char* valueName) {
         char name_str[80], label_str[80];
         sprintf(name_str, "ap.custom.%s", eventName);
-        sprintf(label_str, label);
+        strncpy(label_str, label, 80);
 
         Element& e = (type (name_str, T_CUSTOM_BASE, label_str,false, i)
                 << category("Async Application", "Profiling")
