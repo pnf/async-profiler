@@ -19,7 +19,9 @@ enum EventType {
     INSTRUMENTED_METHOD,
     MALLOC_SAMPLE,
     JEMALLOC_SAMPLE,  // MS: must be before alloc_sample due to inequality check in profiler.cpp
+    JEMALLOC_LIVE,
     ALLOC_SAMPLE,
+    ALLOC_LIVE,
     ALLOC_OUTSIDE_TLAB,
     LIVE_OBJECT,
     LOCK_SAMPLE,
