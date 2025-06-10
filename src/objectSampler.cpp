@@ -363,6 +363,7 @@ class LiveRefs {
                         // Object is gone.
                         jni->DeleteWeakGlobalRef(w);
                         _refs[i] = 0;
+                        _full = false;
                         if (_persist && _values[i].published) {
                             // We've already published the allocation.  Now publish the deallocation.  The stack is no
                             // longer in call trace storage, so we publish a stub, which includes the identifying hash.
@@ -414,15 +415,18 @@ void ObjectSampler::GarbageCollectionStart(jvmtiEnv* jvmti) {
 }
 
 void ObjectSampler::recordJEMalloc(const void* addr, size_t size, bool isFree) {
-    if (_live && jemalloc_enabled) {
-        if (lastJemallocSampleTime == 0 ||  OS::nanotime() < lastJemallocSampleTime) {
+    if (jemalloc_enabled) {
+        if (lastJemallocSampleTime == 0 || OS::nanotime() < lastJemallocSampleTime) {
             jlong tsize = size > _jemallocInterval ? size : _jemallocInterval;
-            u64 tag = 0;
-            u64 trace = Profiler::instance()->recordSample(NULL, 0, JEMALLOC_SAMPLE, 0, &tag);
-            const char *err = live_refs.add(addr, tsize, isFree, trace, tag);
-            if (err) {
-                Profiler::instance()->recordExternalSample(tsize, "Lost", err, 0);
-                Log::warn("Unable to record jemalloc allocation of %ld, %s", isFree ? -tsize : size, err);
+            Profiler::instance()->recordSample(NULL, tsize, JEMALLOC_SAMPLE, 0);
+            if (_live) {
+                u64 tag = 0;
+                u64 trace = Profiler::instance()->recordSample(NULL, 0, JEMALLOC_LIVE, 0, &tag);
+                const char *err = live_refs.add(addr, tsize, isFree, trace, tag);
+                if (err) {
+                    Profiler::instance()->recordExternalSample(tsize, "Lost", err, 0);
+                    Log::warn("Unable to record jemalloc allocation of %ld, %s", isFree ? -tsize : size, err);
+                }
             }
         } else {
             Log::warn("Turning off jemalloc allocation after timeout.");
@@ -445,20 +449,17 @@ void ObjectSampler::recordAllocation(jvmtiEnv* jvmti, JNIEnv* jni, EventType eve
             live_refs.add(jni, object, size, trace, 0);
         }
     } else {
+        Profiler::instance()->recordSample(NULL, event._total_size, ALLOC_SAMPLE, &event);
         if (_live) {
             u64 tag = 0;
             // Store a trace of zero size.  We'll increment only if it's still alive at dump time.
-            u64 trace = Profiler::instance()->recordSample(NULL, 0, event_type, &event, &tag);
+            u64 trace = Profiler::instance()->recordSample(NULL, 0, ALLOC_LIVE, &event, &tag);
             const char *err = live_refs.add(jni, object, event._total_size, trace, tag);
             if (err) {
                 Log::warn("Unable to record object allocation of %llu, %s", event._total_size, err);
                 // Add to the lost allocation counter
                 Profiler::instance()->recordExternalSample(event._total_size, "Lost", err, 0);
-                // Increment count on the allocation, since it will otherwise not be reported
-                Profiler::instance()->recordExternalSample(event._total_size, LIVE_OBJECT, 0, trace);
             }
-        } else {
-            Profiler::instance()->recordSample(NULL, event._total_size, event_type, &event);
         }
     }
 }

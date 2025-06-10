@@ -45,7 +45,7 @@ public class AllocTests {
     public void startup(TestProcess p) throws Exception {
         Output out = p.waitForExit("%f");
         out = out.convertFlameToCollapsed();
-        assert out.contains("JNI_CreateJavaVM");
+        // assert out.contains("JNI_CreateJavaVM"); // MS - stripping native stacks for alloc
         assert out.contains("java/lang/ClassLoader\\.loadClass");
         assert out.contains("java\\.lang\\.Class");
         assert out.contains("java\\.lang\\.Thread");

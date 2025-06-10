@@ -190,7 +190,8 @@ void FrameName::javaMethodName(jmethodID method) {
 
     if ((err = jvmti->GetMethodName(method, &method_name, &method_sig, NULL)) == 0 &&
         (err = jvmti->GetMethodDeclaringClass(method, &method_class)) == 0 &&
-        (err = jvmti->GetClassSignature(method_class, &class_name, NULL)) == 0) {
+        (err = jvmti->GetClassSignature(method_class, &class_name, NULL)) == 0 &&
+        class_name && method_name && method_sig) {  // MS: explicitly check for non-zero char pointer
         // Trim 'L' and ';' off the class descriptor like 'Ljava/lang/Object;'
         javaClassName(class_name + 1, strlen(class_name) - 2, _style);
         _str.append(".").append(method_name);
@@ -286,6 +287,7 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
         case BCI_LOCK:
         case BCI_PARK: {
             const char* symbol = _class_names[(uintptr_t)frame.method_id];
+            if (!symbol)  return "[class_name error]"; // MS
             javaClassName(symbol, strlen(symbol), _style | STYLE_DOTTED);
             if (!for_matching && !(_style & STYLE_DOTTED)) {
                 _str += frame.bci == BCI_ALLOC_OUTSIDE_TLAB ? "_[k]" : "_[i]";

@@ -102,9 +102,11 @@ static inline int hasNativeStack(EventType event_type) {
         (1 << EXECUTION_SAMPLE)  |
         (1 << WALL_CLOCK_SAMPLE) |
         (1 << MALLOC_SAMPLE)     |
-        (1 << ALLOC_SAMPLE)      |
+        // (1 << ALLOC_SAMPLE)      | // MS
         (1 << ALLOC_OUTSIDE_TLAB) |
-        (1 << JEMALLOC_SAMPLE);
+        (1 << JEMALLOC_SAMPLE) |
+        (1 << JEMALLOC_LIVE)
+        ;
     return (1 << event_type) & events_with_native_stack;
 }
 
@@ -1089,7 +1091,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
                     num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
                 }
             } else if (event_type == MALLOC_SAMPLE ||
-                       event_type == JEMALLOC_SAMPLE) { // MS
+                       event_type == JEMALLOC_SAMPLE || event_type == JEMALLOC_LIVE) { // MS
                 num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
             } else {
                 // Lock events and instrumentation events can safely call synchronous JVM TI stack walker.
@@ -1183,12 +1185,17 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     }
     // MS: Add event type identification frame
     else if (_eventtypeframes) {
-        if (event_type == LOCK_SAMPLE || event_type == PARK_SAMPLE)
-            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "Lock");
-        else if (event_type == ALLOC_SAMPLE)
-            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "Alloc");
-        else if (event_type == JEMALLOC_SAMPLE)
-            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "AllocNative");
+        const char* tpe = NULL;
+        switch(event_type) {
+            case LOCK_SAMPLE:
+            case PARK_SAMPLE: tpe = "Lock";  break;
+            case ALLOC_SAMPLE: tpe = "Alloc"; break;
+            case ALLOC_LIVE: tpe = "Live"; break;
+            case JEMALLOC_LIVE: tpe = "LiveNative"; break;
+            case JEMALLOC_SAMPLE: tpe = "AllocNative"; break;
+        }
+        if (tpe)
+            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, tpe);
     }
 
     // MS: Add external context tag if set so parent process can attach stack
