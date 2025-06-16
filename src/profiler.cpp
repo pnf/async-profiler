@@ -282,14 +282,20 @@ static void JNICALL virtualMount(jvmtiEnv* jvmti, ...) {
   jthread thread = va_arg(ap, jthread);
   jlong tid = env->GetLongField(thread, tidField);  // Get internal Thread.tid
   ad->mounted_vthread_id = tid;  // Record mounted virtual thread in os-thread-local fields
-  ad->mounted_vthread = thread;
+  ad->mounted_vthread_ref = env->NewGlobalRef(thread);
 }
 
 static void JNICALL virtualUnMount(jvmtiEnv* jvmti, ...) {
+  va_list ap;
+  va_start(ap, jvmti);
+  JNIEnv* env = va_arg(ap, JNIEnv*);
+
   AwaitData* ad = Profiler::instance()->threadLocalAwaitData(true);
   if (!ad) return;
   ad->mounted_vthread_id = 0;
-  ad->mounted_vthread = 0;
+  jobject ref = ad->mounted_vthread_ref;
+  ad->mounted_vthread_ref = 0;
+  env->DeleteGlobalRef(ref);
 }
 
 // Gets pointer to the OS-thread-local await data block, calloc-ing it if necessary.
@@ -941,12 +947,18 @@ int Profiler::bail(int tid, EventType event_type, int lock_index) {
 
 // MS: Run in another thread at a safepoint to record full stacks
 
-void Profiler::recordDeferred(int n, long ms) {
+void Profiler::recordDeferred(JNIEnv* env, int n, long ms) {
     static Deferred d;
     _recording_deferred = true;
     // Pull deferred stacks off queue and pass to recordSampled to capture full java stack
     while(n-- && _dq.wait_dequeue_timed(d, std::chrono::milliseconds(ms))) {
-        recordSample(NULL, d.counter, d.event_type, &d.event, NULL, &d);
+        // Ensure that our jthread is good for the life of the sample
+        jobject ref = env->NewGlobalRef(d.thread_ref);
+        if (ref) {
+            d.thread_ref = ref;
+            recordSample(NULL, d.counter, d.event_type, &d.event, NULL, &d);
+            VM::jni()->DeleteGlobalRef(ref);
+        }
     }
 }
 static const u64 DEFERRED_POS_MASK = (1 << 10) - 1;
@@ -990,6 +1002,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
 
     // MS: When called from deferred recording thread, stitch stacks
     if (deferred) {
+        possibly_truncated = false;
         ASGCT_CallFrame* df = deferred->frames;
         epoch++;
         int i,j;
@@ -998,7 +1011,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
             _deferred_pos[mix(df[j].method_id)] = j+1;
         jvmtiFrameInfo* fj = (jvmtiFrameInfo*) _deferred_buf;
         ASGCT_CallFrame* f2 = (ASGCT_CallFrame*) _deferred_buf;
-        int nj = getJavaTraceJvmti(deferred->thread, fj , f2, 0, _max_stack_depth) - 1;
+        int nj = getJavaTraceJvmti(deferred->thread_ref, fj , f2, 0, _max_stack_depth) - 1;
         int j1 = deferred->first_java_frame;
         for(i=0; i<nj; i++) {
             // Is this frame found in our deferred stack?
@@ -1138,7 +1151,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
                     }
                     j += makeFrame(d.frames+j, BCI_CUSTOM, "deferred");
                     d.frames[j] = {0, 0, 0}; // null terminate
-                    d.thread = tlad->mounted_vthread;
+                    d.thread_ref = tlad->mounted_vthread_ref;
                     d.counter = counter;
                     d.event = *event;
                     d.event_type = event_type;

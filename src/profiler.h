@@ -85,7 +85,7 @@ struct AwaitData;
 struct Deferred {
     ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]; // frames captured from signal callback
     volatile AwaitData* awaitData;               // await data for captured thread
-    jthread thread;
+    jthread thread_ref;
     u64 counter;
     EventType event_type;
     Event event;
@@ -107,7 +107,7 @@ struct AwaitData {
     long stackId[MAX_AWAIT_STACKS+1];
     // os thread-local data:
     long mounted_vthread_id;
-    jthread mounted_vthread;
+    jthread mounted_vthread_ref;
     producer_token_t* producer_token;
 };
 
@@ -310,7 +310,7 @@ class Profiler {
     void recordExternalSample(u64 counter, const char* custom, const char* error, u64 sidref);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
-    void recordDeferred(int n, long ms);
+    void recordDeferred(JNIEnv* env, int n, long ms);
     void recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event);
     void recordExternalSample(u64 counter, EventType event_type, Event* event, long trace);
     void recordEventOnly(EventType event_type, Event* event);
