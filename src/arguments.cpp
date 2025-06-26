@@ -371,6 +371,8 @@ Error Arguments::parse(const char* args) {
                         _cstack = CSTACK_VM;
                     } else if (strcmp(value, "vmx") == 0) {
                         _cstack = CSTACK_VMX;
+                    } else if (strcmp(value, "dwarfvm") == 0) {
+                        _cstack = CSTACK_DWARF_VM;
                     } else {
                         _cstack = CSTACK_NO;
                     }

@@ -141,6 +141,10 @@ static bool isUnsafe(const char* name) {
             (strcmp(name, "__tls_get_addr_slow") == 0) ||
             (strncmp(name,"je_arena", 8) == 0) ||
             (strncmp(name,"je_tcache", 9) == 0) ||
+            (strncmp(name,"je_tctx",7) == 0) ||
+            (strncmp(name,"je_extent_",10) == 0) ||
+            // Skip je_prof_* methods, unless they relate to sampling
+            (strncmp(name,"je_prof_",8) == 0 && strstr(name, "sample") == NULL) ||
            (strcmp(name, "Java_one_profiler_AsyncProfiler_testIgnored") == 0);
 }
 

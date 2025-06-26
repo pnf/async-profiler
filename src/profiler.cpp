@@ -274,6 +274,7 @@ static volatile jmethodID runContinuationId;        // VirtualThread.runContinua
 
 // MS virtual mount/unmount callbacks
 static void JNICALL virtualMount(jvmtiEnv* jvmti, ...) {
+  // Get OS thread-local region in which we'll stash the currently mounted virtual thread
   AwaitData* ad = Profiler::instance()->threadLocalAwaitData(true);
   if (!ad) return;
   va_list ap;
@@ -620,11 +621,12 @@ int Profiler::getNativeTrace(void* ucontext, ASGCT_CallFrame* frames, EventType 
     // Use PerfEvents stack walker for execution samples, or basic stack walker for other events
     if (event_type == PERF_SAMPLE) {
         native_frames = PerfEvents::walk(tid, ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
+    } else if (_cstack == CSTACK_DWARF || _cstack == CSTACK_DWARF_VM) {
+        native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     } else if (_cstack >= CSTACK_VM) {
         return 0;
-    } else if (_cstack == CSTACK_DWARF) {
-        native_frames = StackWalker::walkDwarf(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
-    } else {
+    }
+    else {
         native_frames = StackWalker::walkFP(ucontext, callchain, MAX_NATIVE_FRAMES, java_ctx);
     }
 
@@ -946,7 +948,7 @@ int Profiler::bail(int tid, EventType event_type, int lock_index) {
 }
 
 // MS: Run in another thread at a safepoint to record full stacks
-
+// If this method is never run, we will not handle virtual thread continuations specially
 void Profiler::recordDeferred(JNIEnv* env, int n, long ms) {
     static Deferred d;
     _recording_deferred = true;
@@ -963,9 +965,10 @@ void Profiler::recordDeferred(JNIEnv* env, int n, long ms) {
 }
 static const u64 DEFERRED_POS_MASK = (1 << 10) - 1;
 static const u64 LONG_PHI = 0x9E3779B97F4A7C15L;
-static u64 epoch = 1;
-static u16 mix(jmethodID x) {
-    u64 h = ((u64) x + epoch) * LONG_PHI;
+static u64 deferral_epoch = 1;
+static u16 mix(jmethodID id) {
+    // Mix in deferral epoch, to randomize collsions
+    u64 h = ((u64) id + deferral_epoch) * LONG_PHI;
     h ^= h >> 32;
     return (u16) (h & DEFERRED_POS_MASK);
 }
@@ -996,7 +999,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     AwaitData* tlad = threadLocalAwaitData(false);
     long mounted_vthread_id = tlad ? tlad->mounted_vthread_id : 0;
     // MS: definitely not a continuation if not  virtual thread.
-    bool possibly_truncated = true; // mounted_vthread_id != 0;
+    bool possibly_truncated = mounted_vthread_id != 0;
     const char *unsafe_frame = NULL;  // MS
     int first_java_frame = -1;
 
@@ -1004,45 +1007,41 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     if (deferred) {
         possibly_truncated = false;
         ASGCT_CallFrame* df = deferred->frames;
-        epoch++;
+        deferral_epoch++;
         int i,j;
         int n = deferred->num_frames;
         for (j = n-1; j>=0; j--)
             _deferred_pos[mix(df[j].method_id)] = j+1;
         jvmtiFrameInfo* fj = (jvmtiFrameInfo*) _deferred_buf;
         ASGCT_CallFrame* f2 = (ASGCT_CallFrame*) _deferred_buf;
-        int nj = getJavaTraceJvmti(deferred->thread_ref, fj , f2, 0, _max_stack_depth) - 1;
+        int nJvmti = getJavaTraceJvmti(deferred->thread_ref, fj , f2, 0, _max_stack_depth) - 1;
         int j1 = deferred->first_java_frame;
-        for(i=0; i<nj; i++) {
+        for(i=0; i<nJvmti; i++) {
             // Is this frame found in our deferred stack?
             jmethodID id = (f2++)->method_id;
             j = _deferred_pos[mix(id)];
             if (j>j1 && j<(n-1) &&
+                // position looks reasonable; check for exactly jmethod match
                 df[j-1].method_id == id &&
+                // and check the next one, so we have two in a row
                 df[j].method_id == f2->method_id)
                 break;
         }
-        const char* marker;
-        if (i < nj) {
+        if (i < nJvmti) {
             // Found a match at df[j] == f2[i], so copy over frames up through j
             n = j;
             i++;
-            marker = "stitched";
         } else {
             // No match.  We'll copy all the frames over
             i = 0;
             n = deferred->num_frames;
-
             f2 = (ASGCT_CallFrame*) _deferred_buf;
-            marker = "stitch_error";
-            num_frames +=makeFrame(frames+num_frames, BCI_CUSTOM, marker);
+            num_frames +=makeFrame(frames+num_frames, BCI_ERROR, "stitch_error");
         }
         while(n--) frames[num_frames++] = *df++;
-        // temporarily add a marker
-        // num_frames +=makeFrame(frames+num_frames, BCI_CUSTOM, marker);
         do {
             frames[num_frames++] = *f2++;
-        } while (num_frames < _max_stack_depth && ++i < nj);
+        } while (num_frames < _max_stack_depth && ++i < nJvmti);
     }
     // Not deferred.  Capture stacks as normal.
     else {
@@ -1066,23 +1065,25 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
             }
         }
 
-        // If an unsafe frame was detected in native stack, skip java stack.
-        if (unsafe_frame) {
-            long n = atomicInc(_failures[-java_skipped]) + 1;
-            if (n == 1 || ((n & (n - 1)) == 0)) {
-                Log::info("Skipping unsafe %ld %s", n, unsafe_frame);
-            }
-            num_frames += makeFrame(frames + num_frames, BCI_ERROR, "java_skipped");
+    // If an unsafe frame was detected in native stack, skip java stack.
+    if (unsafe_frame && _cstack < CSTACK_VM) {
+        long n = atomicInc(_failures[-java_skipped])+1;
+        if (n==1 || ((n & (n - 1)) == 0)) {
+            Log::info("Skipping unsafe %ld %s", n, unsafe_frame);
         }
+        num_frames += makeFrame(frames + num_frames, BCI_ERROR, "java_skipped");
+    }
 
         else {
             first_java_frame = num_frames;
             if (_cstack == CSTACK_VMX) {
-                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT);
+                num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_EXPERT, false);
             } else if (event_type <= WALL_CLOCK_SAMPLE) {
                 // Async events
                 if (_cstack == CSTACK_VM) {
-                    num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL);
+                    num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL, false);
+                } if (_cstack == CSTACK_DWARF_VM) {
+                    num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, VM_NORMAL, true);
                 } else {
                     int java_frames = getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
                     if (java_frames > 0 && java_ctx.pc != NULL && VMStructs::hasMethodStructs()) {
@@ -1096,12 +1097,12 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
             } else if (event_type >= ALLOC_SAMPLE && event_type <= ALLOC_OUTSIDE_TLAB && _alloc_engine == &alloc_tracer) {
                 VMThread *vm_thread;
                 if (VMStructs::hasStackStructs() && (vm_thread = VMThread::current()) != NULL) {
-                    num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor());
+                    num_frames += StackWalker::walkVM(ucontext, frames + num_frames, _max_stack_depth, vm_thread->anchor(), false);
                 } else {
                     num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
                 }
             } else if (event_type == MALLOC_SAMPLE ||
-                       event_type == JEMALLOC_SAMPLE) { // MS
+                       event_type == JEMALLOC_SAMPLE || event_type == JEMALLOC_LIVE) { // MS
                 num_frames += getJavaTraceAsync(ucontext, frames + num_frames, _max_stack_depth, &java_ctx);
             } else {
                 // Lock events and instrumentation events can safely call synchronous JVM TI stack walker.
@@ -1195,12 +1196,17 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     }
     // MS: Add event type identification frame
     else if (_eventtypeframes) {
-        if (event_type == LOCK_SAMPLE || event_type == PARK_SAMPLE)
-            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "Lock");
-        else if (event_type == ALLOC_SAMPLE)
-            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "Alloc");
-        else if (event_type == JEMALLOC_SAMPLE)
-            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, "AllocNative");
+        const char* tpe = NULL;
+        switch(event_type) {
+            case LOCK_SAMPLE:
+            case PARK_SAMPLE: tpe = "Lock";  break;
+            case ALLOC_SAMPLE: tpe = "Alloc"; break;
+            case ALLOC_LIVE: tpe = "Live"; break;
+            case JEMALLOC_LIVE: tpe = "LiveNative"; break;
+            case JEMALLOC_SAMPLE: tpe = "AllocNative"; break;
+        }
+        if (tpe)
+            num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, tpe);
     }
 
     // MS: Add external context tag if set so parent process can attach stack

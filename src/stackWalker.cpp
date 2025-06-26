@@ -201,18 +201,20 @@ int StackWalker::walkDwarf(void* ucontext, const void** callchain, int max_depth
     return depth;
 }
 
-int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackDetail detail) {
+int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, StackDetail detail,
+                        bool skip_native) { //MS
     if (ucontext == NULL) {
         return walkVM(ucontext, frames, max_depth, detail,
-                      callerPC(), (uintptr_t)callerSP(), (uintptr_t)callerFP());
+                      callerPC(), (uintptr_t)callerSP(), (uintptr_t)callerFP(), skip_native);
     } else {
         StackFrame frame(ucontext);
         return walkVM(ucontext, frames, max_depth, detail,
-                      (const void*)frame.pc(), frame.sp(), frame.fp());
+                      (const void*)frame.pc(), frame.sp(), frame.fp(), skip_native);
     }
 }
 
-int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, JavaFrameAnchor* anchor) {
+int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, JavaFrameAnchor* anchor,
+                        bool skip_native) { // MS
     uintptr_t sp = anchor->lastJavaSP();
     if (sp == 0) {
         return 0;
@@ -228,11 +230,12 @@ int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth, 
         pc = ((const void**)sp)[-1];
     }
 
-    return walkVM(ucontext, frames, max_depth, VM_BASIC, pc, sp, fp);
+    return walkVM(ucontext, frames, max_depth, VM_BASIC, pc, sp, fp, skip_native);
 }
 
 int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth,
-                        StackDetail detail, const void* pc, uintptr_t sp, uintptr_t fp) {
+                        StackDetail detail, const void* pc, uintptr_t sp, uintptr_t fp,
+                        bool skip_native) { // MS
     StackFrame frame(ucontext);
     uintptr_t bottom = (uintptr_t)&frame + MAX_WALK_SIZE;
 
@@ -382,7 +385,7 @@ int StackWalker::walkVM(void* ucontext, ASGCT_CallFrame* frames, int max_depth,
                 }
             }
         } else {
-            fillFrame(frames[depth++], BCI_NATIVE_FRAME, profiler->findNativeMethod(pc));
+            if (!skip_native) fillFrame(frames[depth++], BCI_NATIVE_FRAME, profiler->findNativeMethod(pc));
         }
 
         uintptr_t prev_sp = sp;
