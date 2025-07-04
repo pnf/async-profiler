@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <string.h>
-#include <atomic>
+#include <cstring>
 #include "objectSampler.h"
+#include <cmath>
 #include "profiler.h"
 #include "tsc.h"
 #include <dlfcn.h> //MS
@@ -165,6 +165,8 @@ class LiveRefs {
         }
     }
 
+    const double jemalloc_sampling_rate =  static_cast<double>(ObjectSampler::jemallocInterval());
+
   public:
     // MS:
     // Note that the _jemallocLock starts out unlocked, since jemalloc needs to record malloc/free
@@ -189,7 +191,7 @@ class LiveRefs {
         _full = false;
     }
 
-    // MS: Private method to actually blow away storage.
+    // MS: Blow away storage, either for final shutdown or testing.
     void clear() {
         // Will be called only in a stopped state, which means _jemallocLock is unlocked, but _lock is locked.
 
@@ -380,8 +382,13 @@ class LiveRefs {
                 if (!_jemalloc_values[i].published) {
                     int tid = _jemalloc_values[i].trace >> 32;
                     u32 call_trace_id = (u32) _jemalloc_values[i].trace;
+                    // Unbias the allocation sample.
+                    // See https://github.com/jemalloc/jemalloc/blob/dev/doc_internal/PROFILING_INTERNALS.md
+                    double z = _jemalloc_values[i].size;
+                    z /= (1.0 - std::exp(-z/jemalloc_sampling_rate));
+                    _jemalloc_values[i].size = static_cast<size_t>(z);
                     // Just ticking up counter on previously stored stack; event=0, so won't go to jfr, and type is irrelevant.
-                    profiler->recordExternalSample(_jemalloc_values[i].size, tid, LIVE_OBJECT, NULL, call_trace_id);
+                    profiler->recordExternalSample(_jemalloc_values[i].size, tid, LIVE_OBJECT, nullptr, call_trace_id);
                     _jemalloc_values[i].published = true;
                     if (!_persist)
                         _addrs[0] = 0;
@@ -431,13 +438,19 @@ public:
 void ObjectSampler::recordJEMalloc(const void* addr, size_t size, bool isFree) {
     if (jemalloc_enabled) {
         if (lastJemallocSampleTime == 0 || OS::nanotime() < lastJemallocSampleTime) {
-            jlong tsize = size > _jemallocInterval ? size : _jemallocInterval;
+            jlong tsize = size; //  > _jemallocInterval ? size : _jemallocInterval;
             if (!isFree)
                 Profiler::instance()->recordSample(NULL, tsize, JEMALLOC_SAMPLE, 0);
             if (_live) {
                 JemallocAllocationRegistration registration(addr, tsize, isFree);
-                u64 tag = 0; // yes, it's needed
-                Profiler::instance()->recordSample(NULL, 0, JEMALLOC_LIVE, 0, &tag, NULL, &registration);
+                // The free does not require another stack sample, but we do need to ensure that it's
+                // processed after the corresponding allocation.
+                if (isFree)
+                    Profiler::instance()->enqueueDeferred(registration);
+                else {
+                    u64 tag = 0;  // discarded
+                    Profiler::instance()->recordSample(NULL, 0, JEMALLOC_LIVE, 0, &tag, NULL, &registration);
+                }
             }
         } else {
             Log::warn("Turning off jemalloc allocation after timeout.");
@@ -628,6 +641,10 @@ void ObjectSampler::jemallocShutdown() {
         setSampleHook((prof_sample_hook_t) NULL);
         live_refs.clear();
     }
+}
+
+void ObjectSampler::liveClear() {
+    live_refs.clear();
 }
 
 void ObjectSampler::stop() {

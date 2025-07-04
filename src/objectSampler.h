@@ -29,7 +29,12 @@ class ObjectSampler : public Engine {
 
     static void jemallocShutdown();  // MS
 
+
   public:
+    static void liveClear(); // MS
+
+    static u64 jemallocInterval() { return _jemallocInterval; }
+
     const char* type() {
         return "object_sampler";
     }

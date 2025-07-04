@@ -946,18 +946,22 @@ int Profiler::bail(int tid, EventType event_type, int lock_index) {
 
 // MS: Run in another thread at a safepoint to record full stacks
 // If this method is never run, we will not handle virtual thread continuations specially
-void Profiler::recordDeferred(JNIEnv* env, int n, long ms) {
+void Profiler::processDeferred(JNIEnv* env, int n, long ms) {
     static Deferred d;
     _recording_deferred = true;
     // Pull deferred stacks off queue and pass to recordSampled to capture full java stack
     while(n-- && _dq.wait_dequeue_timed(d, std::chrono::milliseconds(ms))) {
-        // local ref will be NULL if the thread was already collected; otherwise prevent collection until we're done
-        jthread thread = VM::jni()->NewLocalRef(d.thread_ref);
-        d.thread_ref = thread;
-        u64 tag = 0; // necessary
-        recordSample(NULL, d.counter, d.event_type, &d.event, d.needsTag ? &tag : NULL, &d);
-        if (thread)
-            VM::jni()->DeleteLocalRef(thread);
+        if (d.event_type == PURE_DEFERRAL)
+            d.registration.run(0, 0);
+        else {
+            // local ref will be NULL if the thread was already collected; otherwise prevent collection until we're done
+            jthread thread = VM::jni()->NewLocalRef(d.thread_ref);
+            d.thread_ref = thread;
+            u64 tag = 0; // necessary
+            recordSample(NULL, d.counter, d.event_type, &d.event, d.needsTag ? &tag : NULL, &d);
+            if (thread)
+                VM::jni()->DeleteLocalRef(thread);
+        }
     }
 }
 static const u64 DEFERRED_POS_MASK = (1 << 10) - 1;
@@ -970,7 +974,21 @@ static u16 mix(jmethodID id) {
     return (u16) (h & DEFERRED_POS_MASK);
 }
 
-bool Profiler::enqueueDeferred(u64 counter, EventType event_type, Event* event, u64* tagp,
+// Enqueue a registered closure for deterministic execution on the deferral queue, if one exists.
+// Used for a deallocation whose corresponding allocation might have been deferred, to ensure that
+// they're processed in the right order.
+void Profiler::enqueueDeferred(Registration& registration) {
+    AwaitData* tlad;
+    if (!_recording_deferred || ((tlad = threadLocalAwaitData(false)) == nullptr ) )
+        return registration.run(0,0);
+    Deferred d = {};
+    d.registration = registration;
+    d.event_type = PURE_DEFERRAL;
+    _dq.try_enqueue(*static_cast<producer_token_t *>(tlad->producer_token), d);
+}
+// Called from recordSample if we're on a virtual thread, with a registered closure over the
+// frames we were able to capture.
+bool Profiler::enqueueDeferred(u64 counter, EventType event_type, Event* event, bool needsTag,
                                ASGCT_CallFrame* frames, int num_frames, int first_java_frame,
                                AwaitData* tlad, volatile AwaitData* ad, bool isContinuation,
                                Registration* registrationp
@@ -992,7 +1010,7 @@ bool Profiler::enqueueDeferred(u64 counter, EventType event_type, Event* event, 
     d.first_java_frame = first_java_frame;
     if (registrationp)
         d.registration = *registrationp;
-    d.needsTag = tagp != NULL;
+    d.needsTag = needsTag;
     d.isContinuation = isContinuation;
     // Contents of d will be *copied* onto the queue.
     bool ret = _dq.try_enqueue(*(producer_token_t*)tlad->producer_token, d);
@@ -1046,46 +1064,49 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         else {
             ASGCT_CallFrame *df = deferred->frames;
             const char *err = NULL;
-            int n = deferred->num_frames;
+            int nDeferred = deferred->num_frames;
             if (deferred->thread_ref) {
                 deferral_epoch++;
-                int i, j;
+                int iJvmti, jDeferred;
                 // Create index from methods in deferred stack to earliest position in deferred stack.
-                for (j = n - 1; j >= 0; j--)
-                    _deferred_pos[mix(df[j].method_id)] = j + 1;
+                for (jDeferred = nDeferred - 1; jDeferred >= 0; jDeferred--)
+                    _deferred_pos[mix(df[jDeferred].method_id)] = jDeferred + 1;
                 jvmtiFrameInfo *bufJvmti = (jvmtiFrameInfo *) _deferred_buf;
                 ASGCT_CallFrame *bufAsgct = (ASGCT_CallFrame *) _deferred_buf;
                 int nJvmti = getJavaTraceJvmti(deferred->thread_ref, bufJvmti, bufAsgct, 0, _max_stack_depth) - 1;
-                int j1 = deferred->first_java_frame;
-                for (i = 0; i < nJvmti; i++) {
+                const int j1 = deferred->first_java_frame;
+                for (iJvmti = 0; iJvmti < nJvmti; iJvmti++) {
                     // Is this frame found in our deferred stack?
                     jmethodID id = (bufAsgct++)->method_id;
-                    j = _deferred_pos[mix(id)];
-                    if (j > j1 && j < (n - 1) &&
+                    jDeferred = _deferred_pos[mix(id)];
+                    if (jDeferred > j1 && jDeferred < (nDeferred - 1) &&
                         // position looks reasonable; check for exact jmethod match
-                        df[j - 1].method_id == id &&
+                        df[jDeferred - 1].method_id == id &&
                         // and check the next one, so we have two in a row
-                        df[j].method_id == bufAsgct->method_id)
+                        df[jDeferred].method_id == bufAsgct->method_id)
                         break;
                 }
-                if (i < nJvmti) {
-                    // Found a match at df[j] == bufAsgct[i], so copy over frames up through j
-                    n = j;
-                    i++;
+                if (iJvmti < nJvmti) {
+                    // Found a match at deferred[j] == jvmti[i], so copy over frames up through j
+                    nDeferred = jDeferred;
+                    iJvmti++;
                 } else {
                     // No match.  We'll copy all the frames over
-                    i = 0;
-                    n = deferred->num_frames;
+                    iJvmti = 0;
+                    nDeferred = deferred->num_frames;
                     bufAsgct = (ASGCT_CallFrame *) _deferred_buf;
                     err = "stitch_error";
                 }
-                while (n--) frames[num_frames++] = *df++;
+                // Copy over deferred frames
+                while (nDeferred--) frames[num_frames++] = *df++;
+                // then jvmti frames
                 do {
                     frames[num_frames++] = *bufAsgct++;
-                } while (num_frames < _max_stack_depth && ++i < nJvmti);
+                } while (num_frames < _max_stack_depth && ++iJvmti < nJvmti);
             } else {
+                // Thread no longer exists, presumably gc'd
                 err = "deferred_gcd";
-                while (n--) frames[num_frames++] = *df++;
+                while (nDeferred--) frames[num_frames++] = *df++;
             }
             if (err)
                 num_frames += makeFrame(frames + num_frames, BCI_ERROR, err);
@@ -1193,7 +1214,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
                 jmethodID rc = (jmethodID) loadAcquire(*(u64 *) &runContinuationId);
                 for (int i = first_java_frame; i < num_frames; i++) {
                     if (frames[i].method_id == rc) {
-                        if (enqueueDeferred(counter, event_type, event, tagp,
+                        if (enqueueDeferred(counter, event_type, event, tagp != nullptr,
                                             frames, i, first_java_frame,
                                             tlad, ad, true, registrationp)) {
                             _locks[lock_index].unlock();

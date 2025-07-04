@@ -159,24 +159,31 @@ static bool (*checkIsValid)(void*) = NULL;  // MS
 static bool needToLoadIsValid = true; // MS
 
 void FrameName::javaMethodName(jmethodID method) {
-
-    // MS: Actually working workaround for JDK-8313816.  Call jvm validation method directly.
-    if (checkIsValid == NULL && needToLoadIsValid) {
-        needToLoadIsValid = false;
-        // Get pointer to private Method::is_valid_method(Method *method)
-        checkIsValid = (bool (*)(void *)) VMStructs::libjvm()->findSymbol("_ZN6Method15is_valid_methodEPKS_");
-    }
-    if (checkIsValid != NULL && !checkIsValid(*((void**) method))) {
-        _str.assign("__invalid_jmethodID");
+    // Cherry-picked from upstream
+    if (VMMethod::isStaleMethodId(method)) {
+        _str.assign("[stale_jmethodID]");
         return;
     }
-
-    if (VMStructs::hasMethodStructs()) {
-        // Workaround for JDK-8313816
-        VMMethod* vm_method = VMMethod::fromMethodID(method);
-        if (vm_method == NULL || vm_method->id() == NULL) {
-            _str.assign("[stale_jmethodID]");
+    if (VMMethod::can_dereference_jmethod_id()) {
+        // MS: Actually working workaround for JDK-8313816.  Call jvm validation method directly.
+        // Hopefully not necessary as of java 26, when above check will be false, as it's ostensibly
+        // fixed in 22.
+        if (checkIsValid == NULL && needToLoadIsValid) {
+            needToLoadIsValid = false;
+            // Get pointer to private Method::is_valid_method(Method *method)
+            checkIsValid = (bool (*)(void *)) VMStructs::libjvm()->findSymbol("_ZN6Method15is_valid_methodEPKS_");
+        }
+        if (checkIsValid != NULL && !checkIsValid(*((void**) method))) {
+            _str.assign("__invalid_jmethodID");
             return;
+        }
+        if (VMStructs::hasMethodStructs()) {
+            // Workaround for JDK-8313816, supposedly fixed in 22
+            VMMethod* vm_method = *(VMMethod**) method;
+            if (vm_method == NULL || vm_method->id() == NULL) {
+                _str.assign("[stale_jmethodID]");
+                return;
+            }
         }
     }
 
@@ -203,6 +210,8 @@ void FrameName::javaMethodName(jmethodID method) {
             }
             _str.append(method_sig);
         }
+    } else if (err == JVMTI_ERROR_INVALID_METHODID) {
+        _str.assign("[stale_jmethodID]");
     } else {
         char buf[32];
         snprintf(buf, sizeof(buf), "[jvmtiError %d]", err);

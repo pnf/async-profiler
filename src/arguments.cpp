@@ -11,6 +11,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include "arguments.h"
+
+#include "objectSampler.h"
 #include "profiler.h"
 
 
@@ -479,6 +481,9 @@ Error Arguments::parse(const char* args) {
 
             CASE("stopjemalloc")
                 _action = ACTION_STOP_JEMALLOC;
+
+            CASE("testclear")
+                ObjectSampler::liveClear();
 
             DEFAULT()
                 if (_unknown_arg == NULL) _unknown_arg = arg;

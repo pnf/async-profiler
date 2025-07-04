@@ -254,7 +254,7 @@ class Profiler {
     void dumpText(Writer& out, Arguments& args);
 
     int bail(int tid, EventType event_type, int lock_index);
-    bool enqueueDeferred(u64 counter, EventType event_type, Event* event, u64* tagp,
+    bool enqueueDeferred(u64 counter, EventType event_type, Event* event, bool needsTag,
                          ASGCT_CallFrame* frames, int num_frames, int first_java_frame,
                          AwaitData* tlad, volatile AwaitData* ad, bool isContinuation,
                          Registration* registrationp);
@@ -302,6 +302,7 @@ class Profiler {
             _calltrace_buffer[i] = NULL;
         }
     }
+    void enqueueDeferred(Registration& registration);
 
     volatile static GlobalFlags globalFlags;
 
@@ -344,7 +345,7 @@ class Profiler {
     void recordExternalSample(u64 counter, const char* custom, const char* error, u64 sidref);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
-    void recordDeferred(JNIEnv* env, int n, long ms);
+    void processDeferred(JNIEnv* env, int n, long ms);
     void recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event);
     void recordExternalSample(u64 counter, EventType event_type, Event* event, long trace);
     void recordEventOnly(EventType event_type, Event* event);

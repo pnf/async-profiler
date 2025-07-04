@@ -28,7 +28,8 @@ enum EventType {
     PARK_SAMPLE,
     PROFILING_WINDOW,
     USER_EVENT,
-    CUSTOM  // MS
+    CUSTOM,  // MS
+    PURE_DEFERRAL // MS - pure enqueue
 };
 
 class Event {

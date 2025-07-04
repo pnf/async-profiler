@@ -301,6 +301,7 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     static public native long testMalloc(long sz);
     static public native void testFree(long addr);
     static public native double testIgnored(int count);
+    static public native double testCompute(int count);
     public native void recordDeferred(int n, long ms);
     public native long[] getInternals();
 }

@@ -74,7 +74,7 @@ Java_one_profiler_AsyncProfiler_saveAwaitFrames(JNIEnv* env, jobject unused, int
 
 extern "C" DLLEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_recordDeferred(JNIEnv* env, jobject unused, jint n, jlong ms) {
-   Profiler::instance()->recordDeferred(env, n, ms);
+   Profiler::instance()->processDeferred(env, n, ms);
 }
 
 
@@ -105,14 +105,21 @@ Java_one_profiler_AsyncProfiler_testFree(JNIEnv* env, jclass unused, jlong addr)
    free((void*) addr);
 }
 
+
+extern "C" DLLEXPORT jdouble JNICALL
+Java_one_profiler_AsyncProfiler_testCompute(JNIEnv* env, jclass unused, jint count) {
+    double x = sin(count);
+    while(count-- > 0)
+        x = sin(x);
+    return x;
+}
+
 // Used only to test that a stack containing this method is marked as unsafe.
 extern "C" DLLEXPORT jdouble JNICALL
 Java_one_profiler_AsyncProfiler_testIgnored(JNIEnv* env, jclass unused, jint count) {
-   double x = sin(count);
-   while(count-- > 0)
-       x = sin(x);
-   return x;
+    return Java_one_profiler_AsyncProfiler_testCompute(env, unused, count);
 }
+
 
 extern "C" DLLEXPORT jlongArray JNICALL
 Java_one_profiler_AsyncProfiler_getInternals(JNIEnv* env, jclass unused) {
@@ -237,6 +244,7 @@ static const JNINativeMethod profiler_natives[] = {
     F(getInternals,"()[J"),
     F(testFree, "(J)V"),
     F(testIgnored, "(I)D"),
+    F(testCompute, "(I)D"),
     F(getInternals,"()[J")
 };
 
