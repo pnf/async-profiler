@@ -67,6 +67,7 @@ class OS {
 
   public:
     static long getAllocated();     // MS: track internal memory use
+    static int installForkHandler();   // MS: install a handler to mute and restore signals on fork
 
     static const size_t page_size;
     static const size_t page_mask;

@@ -1454,6 +1454,11 @@ void Profiler::setupSignalHandlers() {
         orig_segvHandler = OS::replaceCrashHandler(segvHandler);
     }
 
+    // MS
+    if (OS::installForkHandler()) {
+        Log::warn("error installing fork handler: %s", strerror(errno));
+    }
+
     OS::installSignalHandler(WAKEUP_SIGNAL, NULL, wakeupHandler);
 }
 
