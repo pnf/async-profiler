@@ -33,7 +33,8 @@ static pthread_create_t _orig_pthread_create = NULL;
 typedef void (*pthread_exit_t)(void*);
 static pthread_exit_t _orig_pthread_exit = NULL;
 
-static void unblock_signals() {
+// ms: extract block / unblock
+static void apply_sigmask_to_prof_signals(int how) {
     sigset_t set;
     sigemptyset(&set);
     if (_global_args._signal == 0) {
@@ -44,7 +45,15 @@ static void unblock_signals() {
             sigaddset(&set, s & 0xff);
         }
     }
-    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    pthread_sigmask(how, &set, NULL);
+}
+
+static void block_signals() {
+  apply_sigmask_to_prof_signals(SIG_BLOCK);
+}
+
+static void unblock_signals() {
+  apply_sigmask_to_prof_signals(SIG_UNBLOCK);
 }
 
 static void* thread_start_wrapper(void* e) {
@@ -190,3 +199,7 @@ void Hooks::patchLibraries() {
         cc->patchImport(im_pthread_exit, (void*)pthread_exit_hook);
     }
 }
+
+// ms: export for use in os
+void Hooks::blockSignals() { block_signals(); }
+void Hooks::unblockSignals() { unblock_signals(); }

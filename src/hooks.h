@@ -19,6 +19,8 @@ class Hooks {
     static bool init(bool attach);
     static void shutdown();
     static void patchLibraries();
+    static void blockSignals();
+    static void unblockSignals();
 
     static bool initialized() {
         return _initialized;

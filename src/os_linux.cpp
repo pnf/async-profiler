@@ -24,6 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "os.h"
+#include "hooks.h" // ms
 
 
 #ifdef __LP64__
@@ -238,6 +239,11 @@ const static bool musl = confstr(_CS_GNU_LIBC_VERSION, NULL, 0) == 0 && errno !=
 
 bool OS::isMusl() {
     return musl;
+}
+
+// MS
+int OS::installForkHandler() {
+  return pthread_atfork(&Hooks::blockSignals, &Hooks::unblockSignals, NULL);
 }
 
 SigAction OS::installSignalHandler(int signo, SigAction action, SigHandler handler) {
