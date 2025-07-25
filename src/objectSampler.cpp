@@ -264,19 +264,14 @@ class LiveRefs {
 
 
     const char* // MS: Return NULL if heap object allocation successfully tracked
-    add(JNIEnv* jni, jobject object, jlong size, u64 trace,
+    add(JNIEnv* jni, jweak wobject, jlong size, u64 trace,
                     u64 tag) { // MS tag entries with unique id
         if (_full) {
             return "AllocFull"; // MS - return semi-meaningful error
         }
 
-        jweak wobject = jni->NewWeakGlobalRef(object);
-        if (wobject == NULL) {
-            return NULL;  // we've done all we can
-        }
-
         if (_lock.tryLock()) {
-            u32 start = (((uintptr_t)object >> 4) * 31 + ((uintptr_t)jni >> 4) + trace) & (_max_refs - 1);
+            u32 start = (((uintptr_t)wobject >> 4) * 31 + ((uintptr_t)jni >> 4) + trace) & (_max_refs - 1);
             u32 i = start;
             u32 tries = 0;
             do {
@@ -313,7 +308,8 @@ class LiveRefs {
             return NULL;
         }
 
-        jni->DeleteWeakGlobalRef(wobject);
+        // MS: removed, will be handled by caller
+        // jni->DeleteWeakGlobalRef(wobject);
         return "AllocLock";
     }
 
@@ -414,19 +410,33 @@ void ObjectSampler::GarbageCollectionStart(jvmtiEnv* jvmti) {
     live_refs.gc();
 }
 
+class JemallocAllocationRegistration : public Registration {
+private:
+    static void _run(u64* data, u64 trace, u64 tag) {
+        const void* addr = (const void*) data[0];
+        u64 tsize = data[1];
+        bool isFree = (bool) data[2];
+        const char *err = live_refs.add(addr, tsize, isFree, isFree ? 0 : trace, tag);
+        if (err) {
+            Profiler::instance()->recordExternalSample(tsize, "Lost", err, 0);
+        }
+    }
+    static void _clean(u64*) {}
+
+public:
+    JemallocAllocationRegistration(const void* addr, u64 tsize, bool isFree) : Registration((u64) addr, tsize, (u64) isFree, _run, _clean) {}
+};
+
+
 void ObjectSampler::recordJEMalloc(const void* addr, size_t size, bool isFree) {
     if (jemalloc_enabled) {
         if (lastJemallocSampleTime == 0 || OS::nanotime() < lastJemallocSampleTime) {
             jlong tsize = size > _jemallocInterval ? size : _jemallocInterval;
             Profiler::instance()->recordSample(NULL, tsize, JEMALLOC_SAMPLE, 0);
             if (_live) {
-                u64 tag = 0;
-                u64 trace = Profiler::instance()->recordSample(NULL, 0, JEMALLOC_LIVE, 0, &tag);
-                const char *err = live_refs.add(addr, tsize, isFree, trace, tag);
-                if (err) {
-                    Profiler::instance()->recordExternalSample(tsize, "Lost", err, 0);
-                    Log::warn("Unable to record jemalloc allocation of %ld, %s", isFree ? -tsize : size, err);
-                }
+                JemallocAllocationRegistration registration(addr, tsize, isFree);
+                u64 tag = 0; // yes, it's needed
+                Profiler::instance()->recordSample(NULL, 0, JEMALLOC_LIVE, 0, &tag, NULL, &registration);
             }
         } else {
             Log::warn("Turning off jemalloc allocation after timeout.");
@@ -434,6 +444,37 @@ void ObjectSampler::recordJEMalloc(const void* addr, size_t size, bool isFree) {
         }
     }
 }
+
+class ObjectAllocationRegistration : public Registration {
+private:
+    static void _run(u64* data, u64 trace, u64 tag) {
+        JNIEnv* jni = (JNIEnv*) data[0];
+        u64 tsize = data[1];
+        jweak wobject = (jobject) data[2];
+        if (wobject) {
+            const char *err = live_refs.add(jni, wobject, tsize, trace, tag);
+            if (err) {
+                // ref was not stored in table, so delete it
+                jni->DeleteWeakGlobalRef(wobject);
+                Profiler::instance()->recordExternalSample(tsize, "Lost", err, 0);
+            }
+        }
+    }
+    static void _clean(u64* data) {
+        JNIEnv* jni = (JNIEnv*) data[0];
+        jweak wobject = (jobject) data[2];
+        if (wobject) jni->DeleteWeakGlobalRef(wobject);
+    }
+
+public:
+    ObjectAllocationRegistration(JNIEnv* jni, u64 tsize, jobject object) :
+            Registration((u64) jni, tsize,
+                       // Wrap with weak ref so we can track if its collected before registration runs
+                       (u64) jni->NewWeakGlobalRef(object),
+                         _run, _clean) {}
+};
+
+
 
 void ObjectSampler::recordAllocation(jvmtiEnv* jvmti, JNIEnv* jni, EventType event_type,
                                      jobject object, jclass object_klass, jlong size) {
@@ -446,20 +487,17 @@ void ObjectSampler::recordAllocation(jvmtiEnv* jvmti, JNIEnv* jni, EventType eve
     if (!_persist) {
         u64 trace = Profiler::instance()->recordSample(NULL, event._total_size, event_type, &event);
         if (_live && trace != 0) {
-            live_refs.add(jni, object, size, trace, 0);
+            live_refs.add(jni, jni->NewWeakGlobalRef(object), size, trace, 0);
         }
     } else {
         Profiler::instance()->recordSample(NULL, event._total_size, ALLOC_SAMPLE, &event);
         if (_live) {
+            ObjectAllocationRegistration registration(jni, event._total_size, object);
             u64 tag = 0;
             // Store a trace of zero size.  We'll increment only if it's still alive at dump time.
-            u64 trace = Profiler::instance()->recordSample(NULL, 0, ALLOC_LIVE, &event, &tag);
-            const char *err = live_refs.add(jni, object, event._total_size, trace, tag);
-            if (err) {
-                Log::warn("Unable to record object allocation of %llu, %s", event._total_size, err);
-                // Add to the lost allocation counter
-                Profiler::instance()->recordExternalSample(event._total_size, "Lost", err, 0);
-            }
+            u64 trace = Profiler::instance()->recordSample(NULL, 0, ALLOC_LIVE, &event, &tag, NULL, &registration);
+            if (!trace)  // If the registration is never going to run, let it be free.
+                registration.clean();
         }
     }
 }

@@ -75,7 +75,7 @@ Java_one_profiler_AsyncProfiler_saveAwaitFrames(JNIEnv* env, jobject unused, int
 
 extern "C" DLLEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_recordDeferred(JNIEnv* env, jobject unused, jint n, jlong ms) {
-   Profiler::instance()->recordDeferred(n, ms);
+   Profiler::instance()->recordDeferred(env, n, ms);
 }
 
 

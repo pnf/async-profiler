@@ -81,19 +81,29 @@ public:
 
 static const int MAX_AWAIT_STACKS = 10;
 
-struct AwaitData;
-struct Deferred {
-    ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]; // frames captured from signal callback
-    volatile AwaitData* awaitData;               // await data for captured thread
-    jthread thread;
-    u64 counter;
-    EventType event_type;
-    Event event;
-    int first_java_frame;
-    int num_frames;
+// Post stack-saving registration does not require allocation.
+// Subclasses should contain neither data members nor virtual methods.
+typedef void (*sc_run_t)(u64* data, u64 trace, u64 tag);
+typedef void (*sc_free_t)(u64* data);
+class Registration {
+private:
+    u64 data[3];
+    sc_run_t _run;
+    sc_free_t _clean;
+public:
+    Registration() : _run(NULL), _clean(NULL) {}
+    Registration(u64 d1, u64 d2, u64 d3, sc_run_t run_, sc_free_t free_) : data{d1, d2, d3}, _run(run_), _clean(free_) {}
+    // Called after stack trace has been stored.  Run out of lock sampling lock.
+    void run(u64 trace, u64 tag) {
+        if(_run) _run(data, trace, tag);
+    }
+    // To be called if recordSample returns zero, which means that run was never called.
+    void clean() {
+        if(_clean) _clean(data);
+    }
 };
 
-typedef moodycamel::BlockingConcurrentQueue<Deferred>::producer_token_t producer_token_t;
+
 
 struct AwaitData {
     // The order of fields is important if getAwaitDataAddress() is used.
@@ -107,9 +117,25 @@ struct AwaitData {
     long stackId[MAX_AWAIT_STACKS+1];
     // os thread-local data:
     long mounted_vthread_id;
-    jthread mounted_vthread;
-    producer_token_t* producer_token;
+    jthread mounted_vthread_ref;
+    void *producer_token;
 };
+
+struct Deferred {
+    ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]; // frames captured from signal callback
+    AwaitData awaitData;               // await data for captured thread
+    jthread thread_ref;
+    u64 counter;
+    EventType event_type;
+    Event event;
+    int first_java_frame;
+    int num_frames;
+    Registration registration;
+    bool needsTag;
+    bool isContinuation;
+};
+
+typedef moodycamel::BlockingConcurrentQueue<Deferred>::producer_token_t producer_token_t;
 
 enum GlobalFlags {
     GF_NONE = 0,
@@ -226,6 +252,10 @@ class Profiler {
     void dumpText(Writer& out, Arguments& args);
 
     int bail(int tid, EventType event_type, int lock_index);
+    bool enqueueDeferred(u64 counter, EventType event_type, Event* event, u64* tagp,
+                         ASGCT_CallFrame* frames, int num_frames, int first_java_frame,
+                         AwaitData* tlad, volatile AwaitData* ad, bool isContinuation,
+                         Registration* registrationp);
 
     volatile bool _savedAwaitStacks = false;
     volatile AwaitData* _vtAwaitData;
@@ -306,11 +336,11 @@ class Profiler {
     void logStats();
     void switchThreadEvents(jvmtiEventMode mode);
     int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type, const char ** unsafe);
-    u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp = NULL, Deferred* deferred = NULL);
+    u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp = NULL, Deferred* deferred = NULL, Registration* registrationp = NULL);
     void recordExternalSample(u64 counter, const char* custom, const char* error, u64 sidref);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
-    void recordDeferred(int n, long ms);
+    void recordDeferred(JNIEnv* env, int n, long ms);
     void recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event);
     void recordExternalSample(u64 counter, EventType event_type, Event* event, long trace);
     void recordEventOnly(EventType event_type, Event* event);
