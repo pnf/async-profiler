@@ -271,28 +271,33 @@ void Profiler::setExternalContext(long ctx, const char *shmpath) {
 
 // MS statics
 static volatile bool awaitEnabled = false;
-static volatile jfieldID tidField = 0;              // Thread.tid field id
-static volatile jmethodID runContinuationId;        // VirtualThread.runContinuation method id
+static volatile jmethodID runContinuationId = NULL;        // VirtualThread.runContinuation method id
 
 // MS virtual mount/unmount callbacks
 static void JNICALL virtualMount(jvmtiEnv* jvmti, ...) {
-  // Get OS thread-local region in which we'll stash the currently mounted virtual thread
-  AwaitData* ad = Profiler::instance()->threadLocalAwaitData(true);
-  if (!ad) return;
-  va_list ap;
-  va_start(ap, jvmti);
-  JNIEnv* env = va_arg(ap, JNIEnv*);
-  jthread thread = va_arg(ap, jthread);
-  jlong tid = env->GetLongField(thread, tidField);  // Get internal Thread.tid
-  ad->mounted_vthread_id = tid;  // Record mounted virtual thread in os-thread-local fields
-  ad->mounted_vthread = thread;
+    // Get OS thread-local region in which we'll stash the currently mounted virtual thread
+    AwaitData *ad = Profiler::instance()->threadLocalAwaitData(true);
+    if (!ad) return;
+    va_list ap;
+    va_start(ap, jvmti);
+    JNIEnv *env = va_arg(ap, JNIEnv*);
+    jthread thread = va_arg(ap, jthread);
+    jlong tid = VMThread::javaThreadId(env, thread);
+    // Record mounted virtual thread info os-thread-local fields
+    ad->mounted_vthread_id = tid;
+    // Keep weak reference to thread, so we can test if it's been collected
+    ad->mounted_vthread_ref = env->NewWeakGlobalRef(thread);
 }
 
 static void JNICALL virtualUnMount(jvmtiEnv* jvmti, ...) {
-  AwaitData* ad = Profiler::instance()->threadLocalAwaitData(true);
-  if (!ad) return;
-  ad->mounted_vthread_id = 0;
-  ad->mounted_vthread = 0;
+    va_list ap;
+    va_start(ap, jvmti);
+    JNIEnv *env = va_arg(ap, JNIEnv*);
+    AwaitData *ad = Profiler::instance()->threadLocalAwaitData(true);
+    if (!ad) return;
+    jobject ref = ad->mounted_vthread_ref;
+    ad->mounted_vthread_ref = NULL;
+    env->DeleteWeakGlobalRef(ref);
 }
 
 // Gets pointer to the OS-thread-local await data block, calloc-ing it if necessary.
@@ -303,7 +308,7 @@ AwaitData* Profiler::threadLocalAwaitData(bool may_init) {
     else {
         lockAll();
         ad = (AwaitData *) calloc(1, sizeof(AwaitData));
-        ad->producer_token = new producer_token_t(_dq);
+        ad->producer_token = (void*) new producer_token_t(_dq);
         pthread_setspecific(local_await_data_key, ad);
         unlockAll();
         return ad;
@@ -329,13 +334,9 @@ int Profiler::initAwaitData(int slots) {
     MutexLocker ml(_state_lock);
     lockAll();
     awaitEnabled = true;
-    if (!tidField && slots) {
+    if (!runContinuationId && slots) {
         jvmtiEnv* jvmti = VM::jvmti();
         JNIEnv* env = VM::jni();
-
-        // Store threadID field.
-        jclass threadClass = env->FindClass("java/lang/Thread");
-        storeRelease(*(u64*)&tidField, (u64) env->GetFieldID(threadClass, "tid","J"));
         jclass vtClass = env->FindClass("java/lang/VirtualThread");
         storeRelease(*(u64*)&runContinuationId, (u64) env->GetMethodID(vtClass, "runContinuation", "()V"));
         // Set mount/unmount callbacks
@@ -945,25 +946,61 @@ int Profiler::bail(int tid, EventType event_type, int lock_index) {
 
 // MS: Run in another thread at a safepoint to record full stacks
 // If this method is never run, we will not handle virtual thread continuations specially
-void Profiler::recordDeferred(int n, long ms) {
+void Profiler::recordDeferred(JNIEnv* env, int n, long ms) {
     static Deferred d;
     _recording_deferred = true;
     // Pull deferred stacks off queue and pass to recordSampled to capture full java stack
     while(n-- && _dq.wait_dequeue_timed(d, std::chrono::milliseconds(ms))) {
-        recordSample(NULL, d.counter, d.event_type, &d.event, NULL, &d);
+        // local ref will be NULL if the thread was already collected; otherwise prevent collection until we're done
+        jthread thread = VM::jni()->NewLocalRef(d.thread_ref);
+        d.thread_ref = thread;
+        u64 tag = 0; // necessary
+        recordSample(NULL, d.counter, d.event_type, &d.event, d.needsTag ? &tag : NULL, &d);
+        if (thread)
+            VM::jni()->DeleteLocalRef(thread);
     }
 }
 static const u64 DEFERRED_POS_MASK = (1 << 10) - 1;
 static const u64 LONG_PHI = 0x9E3779B97F4A7C15L;
 static u64 deferral_epoch = 1;
 static u16 mix(jmethodID id) {
-    // Mix in deferral epoch, to randomize collsions
+    // Mix in deferral epoch, to randomize collisions
     u64 h = ((u64) id + deferral_epoch) * LONG_PHI;
     h ^= h >> 32;
     return (u16) (h & DEFERRED_POS_MASK);
 }
 
-u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp, Deferred* deferred) {
+bool Profiler::enqueueDeferred(u64 counter, EventType event_type, Event* event, u64* tagp,
+                               ASGCT_CallFrame* frames, int num_frames, int first_java_frame,
+                               AwaitData* tlad, volatile AwaitData* ad, bool isContinuation,
+                               Registration* registrationp
+                               ) {
+    if (!tlad || !tlad->producer_token)
+        return false;
+    Deferred d;
+    d.num_frames = num_frames;
+    int j = 0;
+    for(; j < num_frames && num_frames < (DEFAULT_JSTACKDEPTH - 2); j++)
+        d.frames[j] = frames[j];
+    j += makeFrame(d.frames+j, BCI_CUSTOM, "deferred");
+    d.frames[j] = {0, 0, 0}; // null terminate
+    d.thread_ref = isContinuation ? tlad->mounted_vthread_ref : NULL;
+    d.counter = counter;
+    d.event = *event;
+    d.event_type = event_type;
+    d.awaitData = *(AwaitData*) ad;
+    d.first_java_frame = first_java_frame;
+    if (registrationp)
+        d.registration = *registrationp;
+    d.needsTag = tagp != NULL;
+    d.isContinuation = isContinuation;
+    // Contents of d will be *copied* onto the queue.
+    bool ret = _dq.try_enqueue(*(producer_token_t*)tlad->producer_token, d);
+    return ret;
+}
+
+u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Event* event,
+                           u64* tagp, Deferred* deferred, Registration* registrationp) {
     int tid = fastThreadId();
     if (Protect::protectedOperation())
         return bail(tid, event_type, -1);
@@ -987,50 +1024,76 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
     int num_frames = 0;
 
     AwaitData* tlad = threadLocalAwaitData(false);
-    long mounted_vthread_id = tlad ? tlad->mounted_vthread_id : 0;
-    // MS: definitely not a continuation if not  virtual thread.
-    bool possibly_truncated = mounted_vthread_id != 0;
+    // MS: definitely not a VT continuation if not  virtual thread.
+    bool possibly_truncated = tlad && tlad->mounted_vthread_ref;
     const char *unsafe_frame = NULL;  // MS
     int first_java_frame = -1;
 
+    u64 tag_temp = 0;
+
+    volatile AwaitData* ad = NULL;
+
     // MS: When called from deferred recording thread, stitch stacks
     if (deferred) {
-        ASGCT_CallFrame* df = deferred->frames;
-        deferral_epoch++;
-        int i,j;
-        int n = deferred->num_frames;
-        for (j = n-1; j>=0; j--)
-            _deferred_pos[mix(df[j].method_id)] = j+1;
-        jvmtiFrameInfo* fj = (jvmtiFrameInfo*) _deferred_buf;
-        ASGCT_CallFrame* f2 = (ASGCT_CallFrame*) _deferred_buf;
-        int nJvmti = getJavaTraceJvmti(deferred->thread, fj , f2, 0, _max_stack_depth) - 1;
-        int j1 = deferred->first_java_frame;
-        for(i=0; i<nJvmti; i++) {
-            // Is this frame found in our deferred stack?
-            jmethodID id = (f2++)->method_id;
-            j = _deferred_pos[mix(id)];
-            if (j>j1 && j<(n-1) &&
-                // position looks reasonable; check for exactly jmethod match
-                df[j-1].method_id == id &&
-                // and check the next one, so we have two in a row
-                df[j].method_id == f2->method_id)
-                break;
+        // Use await data from time of deferral
+        ad = &deferred->awaitData;
+
+        if (!deferred->isContinuation) {
+            num_frames = deferred->num_frames;
+            memcpy(frames, deferred->frames, num_frames * sizeof(frames[0]));
         }
-        if (i < nJvmti) {
-            // Found a match at df[j] == f2[i], so copy over frames up through j
-            n = j;
-            i++;
-        } else {
-            // No match.  We'll copy all the frames over
-            i = 0;
-            n = deferred->num_frames;
-            f2 = (ASGCT_CallFrame*) _deferred_buf;
-            num_frames +=makeFrame(frames+num_frames, BCI_ERROR, "stitch_error");
+
+        else {
+            ASGCT_CallFrame *df = deferred->frames;
+            const char *err = NULL;
+            int n = deferred->num_frames;
+            if (deferred->thread_ref) {
+                deferral_epoch++;
+                int i, j;
+                // Create index from methods in deferred stack to earliest position in deferred stack.
+                for (j = n - 1; j >= 0; j--)
+                    _deferred_pos[mix(df[j].method_id)] = j + 1;
+                jvmtiFrameInfo *bufJvmti = (jvmtiFrameInfo *) _deferred_buf;
+                ASGCT_CallFrame *bufAsgct = (ASGCT_CallFrame *) _deferred_buf;
+                int nJvmti = getJavaTraceJvmti(deferred->thread_ref, bufJvmti, bufAsgct, 0, _max_stack_depth) - 1;
+                int j1 = deferred->first_java_frame;
+                for (i = 0; i < nJvmti; i++) {
+                    // Is this frame found in our deferred stack?
+                    jmethodID id = (bufAsgct++)->method_id;
+                    j = _deferred_pos[mix(id)];
+                    if (j > j1 && j < (n - 1) &&
+                        // position looks reasonable; check for exact jmethod match
+                        df[j - 1].method_id == id &&
+                        // and check the next one, so we have two in a row
+                        df[j].method_id == bufAsgct->method_id)
+                        break;
+                }
+                if (i < nJvmti) {
+                    // Found a match at df[j] == bufAsgct[i], so copy over frames up through j
+                    n = j;
+                    i++;
+                } else {
+                    // No match.  We'll copy all the frames over
+                    i = 0;
+                    n = deferred->num_frames;
+                    bufAsgct = (ASGCT_CallFrame *) _deferred_buf;
+                    err = "stitch_error";
+                }
+                while (n--) frames[num_frames++] = *df++;
+                do {
+                    frames[num_frames++] = *bufAsgct++;
+                } while (num_frames < _max_stack_depth && ++i < nJvmti);
+            } else {
+                err = "deferred_gcd";
+                while (n--) frames[num_frames++] = *df++;
+            }
+            if (err)
+                num_frames += makeFrame(frames + num_frames, BCI_ERROR, err);
+
+            registrationp = &deferred->registration;
+            if (deferred->needsTag && registrationp)
+                tagp = &tag_temp;
         }
-        while(n--) frames[num_frames++] = *df++;
-        do {
-            frames[num_frames++] = *f2++;
-        } while (num_frames < _max_stack_depth && ++i < nJvmti);
     }
     // Not deferred.  Capture stacks as normal.
     else {
@@ -1122,45 +1185,40 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
 
     // MS: Look for an await insertion point in java stack
     if (unsafe_frame == NULL) {
-        volatile AwaitData* ad = awaitData();
+        if (!ad) ad = awaitData();
         // Possibly pass our accumulated stacks to the deferred recording thread.
-        producer_token_t *pt;
-        if (possibly_truncated  &&
-           ad && _recording_deferred &&
-           (pt = tlad->producer_token) &&
-           !deferred &&
-           first_java_frame >= 0) {
-            jmethodID rc = (jmethodID) loadAcquire(*(u64*)&runContinuationId);
-            for(int i=first_java_frame; i<num_frames; i++) {
-                if (frames[i].method_id == rc) {
-                    Deferred d;
-                    d.num_frames = i;
-                    int j = 0;
-                    for(;j < i && i < (DEFAULT_JSTACKDEPTH -2); j++) {
-                        d.frames[j] = frames[j];
-                    }
-                    j += makeFrame(d.frames+j, BCI_CUSTOM, "deferred");
-                    d.frames[j] = {0, 0, 0}; // null terminate
-                    d.thread = tlad->mounted_vthread;
-                    d.counter = counter;
-                    d.event = *event;
-                    d.event_type = event_type;
-                    d.awaitData = ad;
-                    d.first_java_frame = first_java_frame;
-                    if (_dq.try_enqueue(*pt, d)) {
-                        _locks[lock_index].unlock();
-                        return 0;
-                    } else {
-                        num_frames += makeFrame(frames+num_frames, BCI_ERROR, "defer_failed");
-                        break;
+        if (ad && _recording_deferred && !deferred) {
+            // Possibly truncated virtual stack
+            if (possibly_truncated && first_java_frame > 0) {
+                jmethodID rc = (jmethodID) loadAcquire(*(u64 *) &runContinuationId);
+                for (int i = first_java_frame; i < num_frames; i++) {
+                    if (frames[i].method_id == rc) {
+                        if (enqueueDeferred(counter, event_type, event, tagp,
+                                            frames, i, first_java_frame,
+                                            tlad, ad, true, registrationp)) {
+                            _locks[lock_index].unlock();
+                            return 1;
+                        } else {
+                            num_frames += makeFrame(frames + num_frames, BCI_ERROR, "defer_failed");
+                        }
                     }
                 }
+                num_frames += makeFrame(frames + num_frames, BCI_ERROR, "runContinuation_not_found");
             }
-            num_frames += makeFrame(frames+num_frames, BCI_ERROR, "runContinuation_not_found");
+            else if (event_type == JEMALLOC_LIVE && _recording_deferred && registrationp) {
+                // jemalloc sample to linearize
+                if (enqueueDeferred(counter, event_type, event, tagp,
+                                    frames, num_frames, first_java_frame, tlad, ad, false, registrationp)) {
+                    _locks[lock_index].unlock();
+                    return 1;
+                } else {
+                    num_frames += makeFrame(frames + num_frames, BCI_ERROR, "defer_failed");
+                }
+            }
         }
 
         if (deferred)
-            ad = deferred->awaitData;
+            ad = &deferred->awaitData;
         if (ad && ad->insertionId && ad->sampledSignalToSet) {
             const long *ids = (const long*) ad->stackId;
             int i = first_java_frame;
@@ -1198,7 +1256,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
             num_frames += makeFrame(frames + num_frames, BCI_CUSTOM, tpe);
     }
 
-    // MS: Add external context tag if set so parent process can attach stack
+    // MS: Add external context marker if set so parent process can attach stack
     if (externalContext && *externalContext && *externalContext != -1L) {
         num_frames += makeFrame(frames + num_frames, BCI_STACK_TAG, (jmethodID) *externalContext);
     }
@@ -1209,7 +1267,12 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
 
     _locks[lock_index].unlock();
-    return (u64)tid << 32 | call_trace_id;
+    u64 trace = (u64)tid << 32 | call_trace_id;
+
+    if (registrationp)
+        registrationp->run(trace, tagp ? *tagp : 0);
+
+    return trace;
 }
 // MS: Record custom sample explicitly, optionally with stack id hash and error frame
 void Profiler::recordExternalSample(u64 counter, const char* customType, const char * error, u64 sidref) {
