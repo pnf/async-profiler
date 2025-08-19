@@ -159,7 +159,9 @@ class Profiler {
     Dictionary _class_map;
     Dictionary _symbol_map;
     ThreadFilter _thread_filter;
-    CallTraceStorage _call_trace_storage;
+    CallTraceStorage _call_trace_storages[2];
+    CallTraceStorage* _call_trace_storage;
+    CallTraceStorage* _snapped_call_trace_storage;
     FlightRecorder _jfr;
     Engine* _engine;
     Engine* _alloc_engine;
@@ -272,7 +274,9 @@ class Profiler {
         _begin_trap(2),
         _end_trap(3),
         _thread_filter(),
-        _call_trace_storage(),
+        _call_trace_storages(),
+        _call_trace_storage(_call_trace_storages),
+        _snapped_call_trace_storage(_call_trace_storages),  // deliberately not different
         _jfr(),
         _start_time(0),
         _epoch(0),

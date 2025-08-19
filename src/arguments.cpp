@@ -437,7 +437,12 @@ Error Arguments::parse(const char* args) {
                 _inverted = true;
 
             // MS custom commands
-
+            // Double-buffer stack storage
+            CASE("dbuf")
+                _double_buffer = true;
+                    // Double-buffer stack storage
+            CASE("bdump")
+                _binary_dump = true;
             // Add event-type frames like "[custom=Alloc]" so we can publish multiple event types without jfr.
             CASE("etypeframes")
                 _eventtypeframes = true;
