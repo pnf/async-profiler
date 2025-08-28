@@ -1996,8 +1996,9 @@ Error Profiler::flushJfr() {
 
 Error Profiler::dump(Writer& out, Arguments& args) {
     MutexLocker ml(_state_lock);
-    // MS: Stop allocation engine in dump if persisting
-    if (_persist && _event_mask & EM_ALLOC && _state == RUNNING) {
+    // MS: Stop allocation engine and dump if persisting
+    bool alloc_flush =_persist && _event_mask & EM_ALLOC && _state == RUNNING;
+    if (alloc_flush) {
         _alloc_engine->stop();
         _event_mask &= !EM_ALLOC; // will be reset at next start
     }
@@ -2017,6 +2018,11 @@ Error Profiler::dump(Writer& out, Arguments& args) {
             _snapped_call_trace_storage = _call_trace_storage;
             _call_trace_storage = other;
             unlockAll();
+            if (alloc_flush) {
+                _event_mask |= EM_ALLOC;
+                VM::addSampleObjectsCapability();
+                _alloc_engine->start(_global_args);
+            }
         } else
             _snapped_call_trace_storage = _call_trace_storage;
     }
