@@ -161,6 +161,8 @@ class Arguments {
     Action _action;
     Counter _counter;
     const char* _event;
+    bool _binary_dump;       // MS
+    bool _double_buffer;     // MS
     bool _eventtypeframes;   // MS
     bool _memoizeframes;     // MS
     const char* _shmContext; // MS
@@ -223,6 +225,8 @@ class Arguments {
         _action(ACTION_NONE),
         _counter(COUNTER_SAMPLES),
         _event(NULL),
+        _binary_dump(false),      // MS
+        _double_buffer(false),    // MS
         _eventtypeframes(false),  // MS
         _persist(false),          // MS
         _memoizeframes(false),    // MS

@@ -432,7 +432,8 @@ void ObjectSampler::recordJEMalloc(const void* addr, size_t size, bool isFree) {
     if (jemalloc_enabled) {
         if (lastJemallocSampleTime == 0 || OS::nanotime() < lastJemallocSampleTime) {
             jlong tsize = size > _jemallocInterval ? size : _jemallocInterval;
-            Profiler::instance()->recordSample(NULL, tsize, JEMALLOC_SAMPLE, 0);
+            if (!isFree)
+                Profiler::instance()->recordSample(NULL, tsize, JEMALLOC_SAMPLE, 0);
             if (_live) {
                 JemallocAllocationRegistration registration(addr, tsize, isFree);
                 u64 tag = 0; // yes, it's needed

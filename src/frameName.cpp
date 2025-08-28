@@ -279,8 +279,16 @@ const char* FrameName::name(ASGCT_CallFrame& frame, bool for_matching) {
     }
 
     switch (frame.bci) {
-        case BCI_NATIVE_FRAME:
-            return decodeNativeSymbol((const char*)frame.method_id);
+        case BCI_NATIVE_FRAME: {
+            JMethodCache::iterator it = _cache.lower_bound(frame.method_id);
+            if (it != _cache.end() && it->first == frame.method_id) {
+                it->second[0] = _cache_epoch;
+                return it->second.c_str() + 1;
+            }
+            const char *name = decodeNativeSymbol((const char *) frame.method_id);
+            _cache.insert(it, JMethodCache::value_type(frame.method_id, std::string(1, _cache_epoch) + name));
+            return name;
+        }
 
         case BCI_ALLOC:
         case BCI_ALLOC_OUTSIDE_TLAB:

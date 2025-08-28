@@ -394,7 +394,7 @@ long Profiler::saveAwaitFrames(AwaitFrameType ft, long *elems, int n) {
     _savedAwaitStacks = true;
     frames[0].method_id = (jmethodID) elems[0];
     frames[0].bci = BCI_AWAIT_MARKER;
-    u32 ret = _call_trace_storage.put(n, frames, 1, 0);
+    u32 ret = _call_trace_storage->put(n, frames, 1, 0);
     _locks[lock_index].unlock();
     return ret;
 }
@@ -1261,7 +1261,7 @@ u64 Profiler::recordSample(void* ucontext, u64 counter, EventType event_type, Ev
         num_frames += makeFrame(frames + num_frames, BCI_STACK_TAG, (jmethodID) *externalContext);
     }
 
-    u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter,
+    u32 call_trace_id = _call_trace_storage->put(num_frames, frames, counter,
                                                 tagp); // MS
     if (event)  // MS: there might not be an event if this is a persistent live reference.
         _jfr.recordEvent(lock_index, tid, call_trace_id, event_type, event);
@@ -1285,7 +1285,7 @@ void Profiler::recordExternalSample(u64 counter, const char* customType, const c
     if (externalContext && *externalContext && *externalContext != -1L)
         n += makeFrame(frames + n, BCI_STACK_TAG, (jmethodID) *externalContext);
     if (n)
-       _call_trace_storage.put(n, frames, counter, 0);
+       _call_trace_storage->put(n, frames, counter, 0);
 }
 
 
@@ -1299,7 +1299,7 @@ void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, 
         num_frames += makeFrame(frames + num_frames, BCI_ERROR, OS::schedPolicy(tid));
     }
 
-    u32 call_trace_id = _call_trace_storage.put(num_frames, frames, counter,
+    u32 call_trace_id = _call_trace_storage->put(num_frames, frames, counter,
                                                 NULL); // MS
 
     u32 lock_index = getLockIndex(tid);
@@ -1319,7 +1319,7 @@ void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, 
 }
 
 void Profiler::recordExternalSamples(u64 samples, u64 counter, int tid, u32 call_trace_id, EventType event_type, Event* event) {
-    _call_trace_storage.add(call_trace_id, samples, counter);
+    _call_trace_storage->add(call_trace_id, samples, counter);
 
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
@@ -1343,7 +1343,7 @@ void Profiler::recordExternalSample(u64 counter, EventType event_type, Event* ev
 
 // MS: Increase counter on a trace that was already recorded.
 void Profiler::recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id) {
-    _call_trace_storage.add(call_trace_id, 1, counter);
+    _call_trace_storage->add(call_trace_id, 1, counter);
 
     u32 lock_index = getLockIndex(tid);
     if (!_locks[lock_index].tryLock() &&
@@ -1383,7 +1383,7 @@ void Profiler::tryResetCounters() {
     // allocation events and skewed incorrect number of samples.
     // In JFR recording, each sample is recorded individually, so accumulated counters are not actually used.
     if (!_jfr.active()) {
-        _call_trace_storage.resetCounters();
+        _call_trace_storage->resetCounters();
     }
 }
 
@@ -1738,7 +1738,7 @@ Error Profiler::start(Arguments& args, bool reset) {
         lockAll();
         _class_map.clear();
         _thread_filter.clear();
-        _call_trace_storage.clear();
+        _call_trace_storage->clear();
         // Make sure frame structure is consistent throughout the entire recording
         _add_event_frame = args._output != OUTPUT_JFR;
         _add_thread_frame = args._threads && args._output != OUTPUT_JFR;
@@ -2009,6 +2009,16 @@ Error Profiler::dump(Writer& out, Arguments& args) {
     if (_state == RUNNING) {
         updateJavaThreadNames();
         updateNativeThreadNames();
+
+        if (args._double_buffer) {
+            CallTraceStorage* other = &_call_trace_storages[1 - (_call_trace_storage - _call_trace_storages)];
+            other->clear();
+            lockAll();
+            _snapped_call_trace_storage = _call_trace_storage;
+            _call_trace_storage = other;
+            unlockAll();
+        } else
+            _snapped_call_trace_storage = _call_trace_storage;
     }
 
     switch (args._output) {
@@ -2039,7 +2049,7 @@ Error Profiler::dump(Writer& out, Arguments& args) {
 }
 
 void Profiler::printUsedMemory(Writer& out) {
-    size_t call_trace_storage = _call_trace_storage.usedMemory();
+    size_t call_trace_storage = _call_trace_storage->usedMemory();
     size_t flight_recording = _jfr.usedMemory();
     size_t dictionaries = _class_map.usedMemory() + _symbol_map.usedMemory() + _thread_filter.usedMemory();
 
@@ -2089,6 +2099,28 @@ void Profiler::switchThreadEvents(jvmtiEventMode mode) {
     }
 }
 
+static ASGCT_CallFrame* dump_buf = NULL;
+static size_t dump_buf_size = 0;
+static void allocate_dump_buf(int i) {
+    if (i >= dump_buf_size) {
+        if (dump_buf_size == 0) dump_buf_size = 1000*1000;
+        while(i >= dump_buf_size) {
+            dump_buf_size *= 2;
+        }
+        dump_buf = (ASGCT_CallFrame*) realloc((void*) dump_buf, dump_buf_size);
+    }
+}
+
+static void set_dump_frame(int i, int bci, jmethodID id) {
+    allocate_dump_buf(i);
+    dump_buf[i].bci = bci;
+    dump_buf[i].method_id = id;
+}
+static void set_dump_frame(int i, ASGCT_CallFrame* frame) {
+    allocate_dump_buf(i);
+    dump_buf[i] = *frame;
+}
+
 /*
  * Dump stacks in FlameGraph input format:
  *
@@ -2102,8 +2134,11 @@ void Profiler::dumpCollapsed(Writer& out, Arguments& args) {
     unsigned int mask = 1 << 29;
 
     std::vector<CallTraceSample*> samples;
-    _call_trace_storage.collectSamples(samples);
+    _snapped_call_trace_storage->collectSamples(samples);
     FrameIterator fi(samples, _savedAwaitStacks);
+
+    int iout = 0;
+    bool binary = args._binary_dump;
 
     for (std::vector<CallTraceSample*>::const_iterator it = samples.begin(); it != samples.end(); ++it) {
         CallTrace* trace = (*it)->acquireTrace();
@@ -2111,30 +2146,45 @@ void Profiler::dumpCollapsed(Writer& out, Arguments& args) {
 
         u64 counter = args._counter == COUNTER_SAMPLES ? (*it)->samples : (*it)->counter;
         if (counter == 0) continue;
-
         int n = fi.setAndCount(trace, true);
+
+        if (binary)
+            set_dump_frame(iout++, 0, (jmethodID) counter);
 
         ASGCT_CallFrame* frame;
         int j = n-1;
         while((frame = fi.prev()) != NULL) {
-            const char* frame_name = fn.name(*frame);
-            if (dict) {
-                unsigned int i = dict->lookup(frame_name, strlen(frame_name), mask);
-                if (i & mask) // not new
-                    out << (i & ~mask);
-                else
-                    out << i << "=" << frame_name;
-            } else {
-                out << frame_name;
+            if (binary)
+                set_dump_frame(iout++, frame);
+            else {
+                const char *frame_name = fn.name(*frame);
+                if (dict) {
+                    unsigned int i = dict->lookup(frame_name, strlen(frame_name), mask);
+                    if (i & mask) // not new
+                        out << (i & ~mask);
+                    else
+                        out << i << "=" << frame_name;
+                } else {
+                    out << frame_name;
+                }
+                out << (j-- == 0 ? ' ' : ';');
             }
-            out << (j-- == 0 ? ' ' : ';');
         }
-        // Beware of locale-sensitive conversion
-        out.write(buf, snprintf(buf, sizeof(buf), "%llu\n", counter));
-        printed_sample_count++;
+        if (binary)
+            set_dump_frame(iout++, 0, 0);
+        else {
+            // Beware of locale-sensitive conversion
+            out.write(buf, snprintf(buf, sizeof(buf), "%llu\n", counter));
+            printed_sample_count++;
+        }
     }
 
     if (dict) delete dict;
+    if (binary) {
+        out << "buf=" << (long) dump_buf
+            << ",szf=" << (int) sizeof(ASGCT_CallFrame)
+            << ",ido" << (int) offsetof(ASGCT_CallFrame, method_id);
+    }
     logEmptyOutput(args, printed_sample_count, out);
 }
 
@@ -2156,7 +2206,7 @@ void Profiler::dumpFlameGraph(Writer& out, Arguments& args, bool tree) {
         FrameName fn(args, args._style & ~STYLE_ANNOTATE, _epoch, _thread_names_lock, _thread_names);
 
         std::vector<CallTraceSample*> samples;
-        _call_trace_storage.collectSamples(samples);
+        _snapped_call_trace_storage->collectSamples(samples);
     FrameIterator fi(samples, _savedAwaitStacks);
 
         for (std::vector<CallTraceSample*>::const_iterator it = samples.begin(); it != samples.end(); ++it) {
@@ -2211,7 +2261,7 @@ void Profiler::dumpText(Writer& out, Arguments& args) {
     u64 total_counter = 0;
     {
         std::map<u64, CallTraceSample> map;
-        _call_trace_storage.collectSamples(map);
+        _snapped_call_trace_storage->collectSamples(map);
         fi = new FrameIterator(map, _savedAwaitStacks);
         samples.reserve(map.size());
 
