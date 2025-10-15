@@ -54,7 +54,7 @@ SKIP?=
 TEST_FLAGS=-DlogDir=$(LOG_DIR) -DlogLevel=$(LOG_LEVEL) -Dskip=$(SKIP)
 
 # always sort SOURCES so zInit is last.
-SOURCES := $(sort $(wildcard src/*.cpp)) src/zlib/gzlog.c
+SOURCES := $(sort $(wildcard src/*.cpp))
 HEADERS := $(wildcard src/*.h)
 RESOURCES := $(wildcard src/res/*)
 JAVA_HELPER_SOURCE := $(wildcard src/helper/one/profiler/*.java)
