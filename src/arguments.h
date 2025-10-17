@@ -168,6 +168,7 @@ class Arguments {
     const char* _shmContext; // MS
     bool _jemalloc; // MS
     bool _persist; // MS
+    bool _jvm; // MS - explicitly set to false to suppress JVM-related activity
     int _timeout;
     long _interval;
     long _alloc;
@@ -232,6 +233,7 @@ class Arguments {
         _memoizeframes(false),    // MS
         _jemalloc(false),         // MS
         _shmContext(NULL),        // MS
+        _jvm(true),
         _timeout(0),
         _interval(0),
         _alloc(-1),

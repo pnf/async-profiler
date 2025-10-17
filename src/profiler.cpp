@@ -1634,7 +1634,7 @@ Engine* Profiler::selectEngine(const char* event_name) {
 
 Engine* Profiler::selectAllocEngine(Arguments& args) {
     // MS: Object sampler is used for both java and jemalloc native allocations.  Will be enabled if either in use.
-    bool object_sampling = VM::addSampleObjectsCapability();
+    bool object_sampling = args._jvm && VM::addSampleObjectsCapability();
     bool jemalloc_sampling =  args._jemalloc && ObjectSampler::checkJemallocEnabled();
     if (object_sampling || jemalloc_sampling) {
         return &object_sampler;
