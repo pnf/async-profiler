@@ -117,8 +117,12 @@ Java_one_profiler_AsyncProfiler_testCompute(JNIEnv* env, jclass unused, jint cou
 // Used only to test that a stack containing this method is marked as unsafe.
 extern "C" DLLEXPORT jdouble JNICALL
 Java_one_profiler_AsyncProfiler_testIgnored(JNIEnv* env, jclass unused, jint count) {
-    return Java_one_profiler_AsyncProfiler_testCompute(env, unused, count);
-}
+    // Don't refactor with testCompute or it will get elided in the stacks!
+    double x = sin(count);
+    while(count-- > 0)
+        x = sin(x);
+    return x;
+    }
 
 
 extern "C" DLLEXPORT jlongArray JNICALL
