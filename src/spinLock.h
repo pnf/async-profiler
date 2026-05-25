@@ -62,4 +62,33 @@ class SpinLock {
     }
 };
 
+class SpinLockScope {
+    SpinLock *_lock;
+    bool _contended = false;
+    bool _locked;
+public:
+
+    bool contended() const { return _contended; }
+    void release() {
+        if (_locked) {
+            _lock->unlock();
+            _locked = false;
+        }
+    }
+
+    SpinLockScope(int& lock) {
+        _lock = (SpinLock*) &lock;
+        if (!_lock->tryLock()) {
+            _contended = true;
+            _lock->lock();
+        }
+        _locked = true;
+    }
+    ~SpinLockScope() {
+        if (_locked)
+        _lock->unlock();
+    }
+
+};
+
 #endif // _SPINLOCK_H

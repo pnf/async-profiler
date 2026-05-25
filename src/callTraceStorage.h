@@ -49,7 +49,6 @@ class CallTraceStorage {
     LongHashTable* _current_table;
     u64 _overflow;
 
-    u64 calcHash(int num_frames, ASGCT_CallFrame* frames);
     CallTrace* storeCallTrace(int num_frames, ASGCT_CallFrame* frames, u64 tagp); // MS: hash tag
     CallTrace* findCallTrace(LongHashTable* table, u64 hash);
 
@@ -57,6 +56,7 @@ class CallTraceStorage {
     CallTraceStorage();
     ~CallTraceStorage();
 
+    static u64 calcHash(int num_frames, ASGCT_CallFrame* frames);
     void clear();
     u32 capacity();
     size_t usedMemory();

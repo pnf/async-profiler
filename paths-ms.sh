@@ -11,7 +11,8 @@ fi
 
 
 export PATH=$TOOLS:$PATH
-export JAVA_HOME=/ms/dist/msjava/PROJ/azulzulu-openjdk/11.0.6.1ms
+export JAVA_HOME=/ms/dist/msjava/PROJ/azulzulu-openjdk/21.0.9_21.46.22
+#export JAVA_HOME=/ms/dist/msjava/PROJ/azulzulu-openjdk/11.0.6.1ms
 
 # The env.sh file can be read in a clion toolchain definition.
 echo export PATH=$PATH > env.sh

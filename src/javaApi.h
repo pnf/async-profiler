@@ -14,6 +14,7 @@ class JavaAPI {
   public:
     static void registerNatives(jvmtiEnv* jvmti, JNIEnv* jni);
     static bool startHttpServer(jvmtiEnv* jvmti, JNIEnv* jni, const char* address);
+    static void callThreadStringCallback(JNIEnv* env, jthread thread, const char* str);
 };
 
 #endif // _JAVAAPI_H

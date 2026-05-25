@@ -265,6 +265,8 @@ bool VM::init(JavaVM* vm, bool attach) {
     capabilities.can_generate_monitor_events = 1;
     capabilities.can_generate_garbage_collection_events = 1;
     capabilities.can_tag_objects = 1;
+    if (VM::hotspot_version() >= 21)
+        capabilities.can_support_virtual_threads = 1;
     _jvmti->AddCapabilities(&capabilities);
 
     jvmtiEventCallbacks callbacks = {0};
@@ -283,6 +285,8 @@ bool VM::init(JavaVM* vm, bool attach) {
     callbacks.SampledObjectAlloc = ObjectSampler::SampledObjectAlloc;
     callbacks.GarbageCollectionStart = ObjectSampler::GarbageCollectionStart;
     callbacks.GarbageCollectionFinish = Profiler::GarbageCollectionFinish;
+    if (VM::hotspot_version() >= 21)
+        callbacks.VirtualThreadEnd = Profiler::VirtualThreadEnd;
     _jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks));
 
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VM_DEATH, NULL);
@@ -290,6 +294,8 @@ bool VM::init(JavaVM* vm, bool attach) {
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_PREPARE, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_DYNAMIC_CODE_GENERATED, NULL);
     _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_GARBAGE_COLLECTION_FINISH, NULL);
+    if (VM::hotspot_version() >= 21)
+        _jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_VIRTUAL_THREAD_END, NULL);
 
     if (hotspot_version() == 0 || !CodeHeap::available()) {
         // Workaround for JDK-8173361: avoid CompiledMethodLoad events when possible

@@ -56,7 +56,7 @@ enum AwaitFrameType {
 // Iterates over frames with (potentially) inserted await stacks
 class FrameIterator {
 private:
-  static const int MAX_DEPTH = 5;
+  static const int MAX_DEPTH = 50;
   CallTrace* traceStack[MAX_DEPTH];
   int positionStack[MAX_DEPTH];
   std::map<jmethodID, CallTrace*> awaitTraces;
@@ -71,8 +71,8 @@ private:
   }
 public:
   FrameIterator(std::vector<CallTraceSample*> &samples, bool savedAwaitStacks);
-    FrameIterator(std::vector<CallTraceSample> &samples, bool savedAwaitStacks);
-    FrameIterator(std::map<long long unsigned int, CallTraceSample> &samples, bool savedAwaitStacks);
+  FrameIterator(std::vector<CallTraceSample> &samples, bool savedAwaitStacks);
+  FrameIterator(std::map<long long unsigned int, CallTraceSample> &samples, bool savedAwaitStacks);
   void set(CallTrace* trace_, bool reversed, int ignore_last = 0);
   int setAndCount(CallTrace* trace_, bool reversed, int ignore_last = 0);
   ASGCT_CallFrame* prev();
@@ -103,45 +103,110 @@ public:
     }
 };
 
-
+#define AD_STACK_SAMPLED 1L
+#define AD_STACK_SAVED 2L
 
 struct AwaitData {
     // The order of fields is important if getAwaitDataAddress() is used.
     // When sampling occurs, we will search for a method_id == insertionId.
     // Starting from the innermost frame, we replace matching ids with successive
     // elements of stackId.
-    // And we put the value sampledSignalToSet into sampledSignal
-    long insertionId;
-    long sampledSignalToSet;
-    long sampledSignal;
-    long stackId[MAX_AWAIT_STACKS+1];
-    // os thread-local data:
-    long mounted_vthread_id;
-    jthread mounted_vthread_ref;
-    void *producer_token;
+    // And we put the value expectedIndicator into sampledIndicator
+    long targetMethodId;      // 0
+    long expectedIndicator;   // 1
+    long sampledIndicator;    // 2
+    volatile long flags;      // 3
+    volatile long thread_id;  // 4
+    long java_stack_id;       // 5
+    long java_stack_hash;     // 6
+    long parent_await_data;   // 7
+    long await_stack_ids[MAX_AWAIT_STACKS+1]; // 8
+    const char* debugInfo;
+    jthread weak_thread_ref;   // weak ref to corresponding virtual thread
+    union {
+        AwaitData* mounted_await_data = nullptr;  // if this is a platform thread
+        AwaitData* next_await_data;     // if an entry in the map
+        struct {
+            int lock;
+            volatile int depth;
+        };
+    };
+    bool sample() volatile {
+        long f;
+        do {
+            f = flags;
+        } while (__sync_val_compare_and_swap(&flags, f, f | AD_STACK_SAMPLED) != f);
+        return (f & (AD_STACK_SAMPLED|AD_STACK_SAVED)) == AD_STACK_SAMPLED;
+    }
+
+    void unsave() volatile {
+        long f;
+        do {
+            f = flags;
+        } while (__sync_val_compare_and_swap(&flags, f, f & ~AD_STACK_SAVED) != f);
+    }
+
+    AwaitData* parentAwaitData() volatile {
+        return (AwaitData*) parent_await_data;
+    }
+
 };
 
+struct Stats {
+    long _enqueued = 0L;
+    long _enqueueFail = 0L;
+    long _stitched = 0L;
+    long _stitchFail = 0L;
+    long _chained = 0L;
+    long _chainFail = 0L;
+    long _vtMapLinks = 0L;
+    long _vtMapEntries = 0L;
+    long _vtMapInsertions = 0L;
+    long _vtMapContended = 0L;
+    long _vtMapDepthInsertions = 0L;
+    long _vtMapMisses = 0L;
+    long _vtMapHits = 0L;
+    long _vtMounts = 0L;
+    long _vtEnds = 0L;
+    long _protected = 0L;
+    Stats diff(Stats& prev) {
+        Stats d;
+        for (int i=0; i<sizeof(Stats)/sizeof(long); i++)
+            ((long*)&d)[i] = ((long*) this)[i] - ((long*)&prev)[i];
+        prev = *this;
+        return d;
+    }
+};
+
+
 struct Deferred {
-    ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]; // frames captured from signal callback
-    AwaitData awaitData;               // await data for captured thread
-    jthread thread_ref;
-    u64 counter;
-    EventType event_type;
+    ASGCT_CallFrame frames[DEFAULT_JSTACKDEPTH]{}; // frames captured from signal callback
+    AwaitData await_data{};               // await data for captured thread
+    jthread sampled_thread_ref{};
+    JNIEnv* jniEnv{};
+    u64 counter{};
+    EventType event_type = (EventType) 0;
     Event event;
-    int first_java_frame;
-    int num_frames;
+    int first_java_frame{};
+    int num_frames{};
     Registration registration;
-    bool needsTag;
-    bool isContinuation;
+    bool needsTag{};
+    bool isContinuation{};
 };
 
 typedef moodycamel::BlockingConcurrentQueue<Deferred>::producer_token_t producer_token_t;
+typedef moodycamel::BlockingConcurrentQueue<Deferred>::consumer_token_t consumer_token_t;
 
 enum GlobalFlags {
     GF_NONE = 0,
     GF_NO_SHUTDOWN = 1
 };
 
+enum AwaitMapAction {
+    AWAIT_MAP_ACTION_FIND_OR_CLAIM = 0,
+    AWAIT_MAP_ACTION_FIND_CREATE = 1,
+    AWAIT_MAP_ACTION_REMOVE = 2
+};
 
 class Profiler {
   private:
@@ -168,6 +233,7 @@ class Profiler {
     int _event_mask;
     bool _eventtypeframes;
     bool _persist;
+    bool _debug_frames;
 
     time_t _start_time;
     time_t _stop_time;
@@ -210,6 +276,7 @@ class Profiler {
 
     void onThreadStart(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);
     void onThreadEnd(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);
+    void onVirtualThreadEnd(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread);
     void onGarbageCollectionFinish();
 
     const char* asgctError(int code);
@@ -248,6 +315,7 @@ class Profiler {
 
     void lockAll();
     void unlockAll();
+    u32 tryLock();
 
     void dumpCollapsed(Writer& out, Arguments& args);
     void dumpFlameGraph(Writer& out, Arguments& args, bool tree);
@@ -256,13 +324,23 @@ class Profiler {
     int bail(int tid, EventType event_type, int lock_index);
     bool enqueueDeferred(u64 counter, EventType event_type, Event* event, bool needsTag,
                          ASGCT_CallFrame* frames, int num_frames, int first_java_frame,
-                         AwaitData* tlad, volatile AwaitData* ad, bool isContinuation,
-                         Registration* registrationp);
+                         AwaitData* tlad, AwaitData* ad, bool isContinuation,
+                         Registration* registrationp, producer_token_t *pt);
+
+    int substituteAwaitMarkers(AwaitData* ad, ASGCT_CallFrame* frames, int first_java_frame, int num_frames) const;
+
+
 
     volatile bool _savedAwaitStacks = false;
-    volatile AwaitData* _vtAwaitData;
+    AwaitData* _vtAwaitData;
+    AwaitData* getVTAwaitData(long vtid, AwaitMapAction action, JNIEnv* env = nullptr);
+    jthread cleanupAwaitData(AwaitData *ad);
     int _vtSlots;
-    moodycamel::BlockingConcurrentQueue<Deferred> _dq;
+    int _vtBucketSize;
+    Mutex _record_thread_lock;
+    moodycamel::BlockingConcurrentQueue<Deferred> *_dq;
+    moodycamel::ConsumerToken *_ct;
+    moodycamel::ProducerToken* _pts[CONCURRENCY_LEVEL];
     CallTraceBuffer* _deferred_buf;
     u32* _deferred_pos;
     volatile bool _recording_deferred;
@@ -290,21 +368,26 @@ class Profiler {
         _call_stub_begin(NULL),
         _call_stub_end(NULL),
         _dlopen_entry(NULL),
+        stats{},
         _vtAwaitData(NULL),
         _vtSlots(0),
-        _dq(moodycamel::ConcurrentQueueDefaultTraits::BLOCK_SIZE * CONCURRENCY_LEVEL * 2),
+        _vtBucketSize(0),
+        _dq(0),
+        _ct(NULL),
         _recording_deferred(false),
         _deferred_buf(NULL),
-        _deferred_pos(NULL)
+        _deferred_pos(NULL),
+        _debug_frames(false)
         {
-
         for (int i = 0; i < CONCURRENCY_LEVEL; i++) {
             _calltrace_buffer[i] = NULL;
         }
     }
     void enqueueDeferred(Registration& registration);
+    AwaitData* virtualMount(JNIEnv* env, jthread vthread);
 
     volatile static GlobalFlags globalFlags;
+    Stats stats;
 
     static Profiler* instance() {
         return _instance;
@@ -315,7 +398,7 @@ class Profiler {
     }
 
     AwaitData* threadLocalAwaitData(bool may_init);
-    volatile AwaitData* awaitData(bool may_init = false);
+    AwaitData* awaitData(bool may_init = false, bool may_virtual = true);
     int initAwaitData(int slots);
     long saveAwaitFrames(AwaitFrameType,long*,int);
     void setExternalContext(long ctx, const char* shmpath);
@@ -342,6 +425,8 @@ class Profiler {
     void switchThreadEvents(jvmtiEventMode mode);
     int convertNativeTrace(int native_frames, const void** callchain, ASGCT_CallFrame* frames, EventType event_type, const char ** unsafe);
     u64 recordSample(void* ucontext, u64 counter, EventType event_type, Event* event, u64* tagp = NULL, Deferred* deferred = NULL, Registration* registrationp = NULL);
+    long recordThread(JNIEnv *env, AwaitData *, int start, const char *info, bool assumeSampled, AwaitData* rabbit = nullptr, u32 existing_lock = CONCURRENCY_LEVEL + 1);
+    u32 recordThreads(JNIEnv *env);
     void recordExternalSample(u64 counter, const char* custom, const char* error, u64 sidref);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, int num_frames, ASGCT_CallFrame* frames);
     void recordExternalSample(u64 counter, int tid, EventType event_type, Event* event, u32 call_trace_id);
@@ -389,6 +474,10 @@ class Profiler {
 
     static void JNICALL ThreadEnd(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
         instance()->onThreadEnd(jvmti, jni, thread);
+    }
+
+    static void JNICALL VirtualThreadEnd(jvmtiEnv* jvmti, JNIEnv* jni, jthread thread) {
+        instance()->onVirtualThreadEnd(jvmti, jni, thread);
     }
 
     static void JNICALL GarbageCollectionFinish(jvmtiEnv* jvmti) {

@@ -33,6 +33,10 @@ static inline u64 atomicInc(volatile u64& var, u64 increment = 1) {
     return __sync_fetch_and_add(&var, increment);
 }
 
+static inline u64 atomicInc(volatile long& var, long increment = 1) {
+    return __sync_fetch_and_add(&var, increment);
+}
+
 static inline int atomicInc(volatile u32& var, int increment = 1) {
     return __sync_fetch_and_add(&var, increment);
 }

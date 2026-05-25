@@ -13,6 +13,7 @@ const long DEFAULT_INTERVAL = 10000000;      // 10 ms
 const long DEFAULT_ALLOC_INTERVAL = 524287;  // 512 KiB
 const long DEFAULT_LOCK_INTERVAL = 10000;    // 10 us
 const int DEFAULT_JSTACKDEPTH = 2048;
+const int DEFAULT_VTHREAD_DEPTH = 100;
 
 const char* const EVENT_CPU        = "cpu";
 const char* const EVENT_ALLOC      = "alloc";
@@ -169,6 +170,7 @@ class Arguments {
     bool _jemalloc; // MS
     bool _persist; // MS
     bool _jvm; // MS - explicitly set to false to suppress JVM-related activity
+    bool _debug_frames; // MS
     int _timeout;
     long _interval;
     long _alloc;
@@ -233,7 +235,8 @@ class Arguments {
         _memoizeframes(false),    // MS
         _jemalloc(false),         // MS
         _shmContext(NULL),        // MS
-        _jvm(true),
+        _jvm(true),               // MS
+        _debug_frames(false),     // MS
         _timeout(0),
         _interval(0),
         _alloc(-1),

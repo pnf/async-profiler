@@ -455,6 +455,8 @@ Error Arguments::parse(const char* args) {
             // 123=foo, and subsequently as 123
             CASE("memoframes")
                 _memoizeframes = true;
+            CASE("infoframes")  // add various fake frames, for debugging and testing
+                _debug_frames = true;
             // Sample native memory allocation using jemalloc hooks
             CASE("jemalloc")
                 _jemalloc = true;

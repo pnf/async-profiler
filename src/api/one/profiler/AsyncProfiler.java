@@ -279,7 +279,7 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
      * Return the address of the thread-local awaitData structure, cast to long, presumably for
      * use with Unsafe.put/getLong.
      */
-    public native long getAwaitDataAddress();
+    public native long getAwaitDataAddress(boolean may_be_virtual);
 
     public native int initAwaitData(int vtSlots);
 
@@ -302,6 +302,17 @@ public class AsyncProfiler implements AsyncProfilerMXBean {
     static public native void testFree(long addr);
     static public native double testIgnored(int count);
     static public native double testCompute(int count);
+    static public native String testInfo(long awaitAddr, String info);
     public native void recordDeferred(int n, long ms);
-    public native long[] getInternals();
+    public native int recordThread(long ad, int start);
+    public native Object[] getInternals();
+
+    /**
+     * Register a callback method to be invoked from native code with a Thread and a String.
+     * The method must have the signature {@code void method(Thread, String)}.
+     *
+     * @param obj      the instance on which to invoke the method
+     * @param methodId the method ID obtained via {@link #getMethodID}
+     */
+    public native void registerThreadStringCallback(Object obj, long methodId);
 }

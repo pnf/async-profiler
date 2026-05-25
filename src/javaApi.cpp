@@ -25,6 +25,27 @@ static void throwNew(JNIEnv* env, const char* exception_class, const char* messa
     }
 }
 
+static jobject _threadStringCallback_obj = NULL;
+static jmethodID _threadStringCallback_method = NULL;
+
+extern "C" DLLEXPORT void JNICALL
+Java_one_profiler_AsyncProfiler_registerThreadStringCallback(JNIEnv* env, jobject unused, jobject obj, jlong methodId) {
+    if (_threadStringCallback_obj != NULL) {
+        env->DeleteGlobalRef(_threadStringCallback_obj);
+        _threadStringCallback_obj = NULL;
+    }
+    _threadStringCallback_obj = obj != NULL ? env->NewGlobalRef(obj) : NULL;
+    _threadStringCallback_method = (jmethodID) methodId;
+}
+
+void JavaAPI::callThreadStringCallback(JNIEnv* env, jthread thread, const char* str) {
+    if (_threadStringCallback_method == NULL || _threadStringCallback_obj == NULL) return;
+    jstring jstr = env->NewStringUTF(str);
+    env->CallVoidMethod(_threadStringCallback_obj, _threadStringCallback_method, thread, jstr);
+    env->DeleteLocalRef(jstr);
+    env->ExceptionClear();
+}
+
 // MS methods follow:
 
 // Wrapper to expose jmethodID to java programs
@@ -55,8 +76,8 @@ Java_one_profiler_AsyncProfiler_externalContext(JNIEnv* env, jobject unused, jlo
 }
 
 extern "C" DLLEXPORT jlong JNICALL
-Java_one_profiler_AsyncProfiler_getAwaitDataAddress(JNIEnv* env, jclass unused) {
-    return (jlong) Profiler::instance()->awaitData(true);
+Java_one_profiler_AsyncProfiler_getAwaitDataAddress(JNIEnv* env, jclass unused, jboolean may_be_virtual) {
+    return (jlong) Profiler::instance()->awaitData(true, may_be_virtual);
 }
 
 extern "C" DLLEXPORT jint JNICALL
@@ -74,7 +95,12 @@ Java_one_profiler_AsyncProfiler_saveAwaitFrames(JNIEnv* env, jobject unused, int
 
 extern "C" DLLEXPORT void JNICALL
 Java_one_profiler_AsyncProfiler_recordDeferred(JNIEnv* env, jobject unused, jint n, jlong ms) {
-   Profiler::instance()->processDeferred(env, n, ms);
+    Profiler::instance()->processDeferred(env, n, ms);
+}
+
+extern "C" DLLEXPORT jint JNICALL
+Java_one_profiler_AsyncProfiler_recordThread(JNIEnv* env, jobject unused, long ad, int start) {
+    return Profiler::instance()->recordThread(env, (AwaitData*) ad, start, "from_java", false);
 }
 
 
@@ -124,14 +150,57 @@ Java_one_profiler_AsyncProfiler_testIgnored(JNIEnv* env, jclass unused, jint cou
     return x;
     }
 
-
-extern "C" DLLEXPORT jlongArray JNICALL
-Java_one_profiler_AsyncProfiler_getInternals(JNIEnv* env, jclass unused) {
-    const unsigned int SZ = 2;
-    long elements[SZ] = {(long) OS::getAllocated(), (long) Protect::timesProtected() };
-    jlongArray ret = env->NewLongArray(SZ);
-    env->SetLongArrayRegion(ret, 0, SZ, elements);
+extern "C" DLLEXPORT jstring JNICALL
+Java_one_profiler_AsyncProfiler_testInfo(JNIEnv* env, jclass unused, jlong awaitAddr, jstring info) {
+    auto ad = awaitAddr ? (AwaitData*) awaitAddr : Profiler::instance()->awaitData(true);
+    jstring ret = ad->debugInfo ?  env->NewStringUTF(ad->debugInfo) : nullptr;
+    if (ad->debugInfo) free((void*) ad->debugInfo);
+    if (info) {
+        const char* info_str = env->GetStringUTFChars(info, NULL);
+        ad->debugInfo = strdup(info_str);
+        env->ReleaseStringUTFChars(info, info_str);
+    } else
+        ad->debugInfo = nullptr;
     return ret;
+}
+
+static void setInfo(JNIEnv* env, jobjectArray array, int* ip, const char* k, double v) {
+    jclass doubleClass = env->FindClass("java/lang/Double");
+    jmethodID valueOf = env->GetStaticMethodID(doubleClass, "valueOf", "(D)Ljava/lang/Double;");
+    env->SetObjectArrayElement(array, (*ip)++, env->NewStringUTF(k));
+    jobject o = env->CallStaticObjectMethod(doubleClass, valueOf, v);
+    env->SetObjectArrayElement(array, (*ip)++, o);
+}
+
+extern "C" DLLEXPORT jobjectArray JNICALL
+Java_one_profiler_AsyncProfiler_getInternals(JNIEnv* env, jclass unused) {
+    const unsigned int SZ = 34;
+    jclass objClass = env->FindClass("java/lang/Object");
+    jobjectArray array = env->NewObjectArray(SZ, objClass, nullptr);
+    int i = 0;
+    static Stats prev;
+    Stats& stats = Profiler::instance()->stats;
+    Stats diff = stats.diff(prev);
+    stats._protected = Protect::timesProtected();
+    setInfo(env, array, &i, "alloc#MU", OS::getAllocated() / 1000000.); // 2
+    setInfo(env, array, &i, "prot#IC", diff._protected); // 4
+    setInfo(env, array, &i, "vtenq#IC", diff._enqueued); // 6
+    setInfo(env, array, &i, "vtenqX#IC", diff._enqueueFail);  //8
+    setInfo(env, array, &i, "vtstitch#IC", diff._stitched); // 10
+    setInfo(env, array, &i, "vtstitchX#IC", diff._stitchFail); // 12
+    setInfo(env, array, &i, "vtchain#IC", diff._chained); // 14
+    setInfo(env, array, &i, "vtchainX#IC", diff._chainFail); //16
+    setInfo(env, array, &i, "vtentries#UC", stats._vtMapEntries); //18
+    setInfo(env, array, &i, "vtmlink#GL", stats._vtMapLinks); // 20
+    setInfo(env, array, &i, "vtmcontd#IC", diff._vtMapContended);// 22
+    setInfo(env, array, &i, "vtmmiss#IC", diff._vtMapMisses);// 24
+    setInfo(env, array, &i, "vtinsert#IC", diff._vtMapInsertions);// 26
+    setInfo(env, array, &i, "vtinsertd#IC", diff._vtMapDepthInsertions); // 28
+    setInfo(env, array, &i, "vtmhit#IC", diff._vtMapHits); // 30
+    setInfo(env, array, &i, "vtend#IC", diff._vtEnds); // 32
+    setInfo(env, array, &i, "vtmount#IC", diff._vtMounts); //34
+    assert(i == SZ);
+    return array;
 }
 
 extern "C" DLLEXPORT void JNICALL
@@ -245,11 +314,13 @@ static const JNINativeMethod profiler_natives[] = {
     F(addCustomEventType, "(ILjava/lang/String;Ljava/lang/String;)V"),
     F(testMalloc, "(J)J"),
     F(recordDeferred, "(IJ)V"),
-    F(getInternals,"()[J"),
+    F(recordThread, "(JI)I"),
     F(testFree, "(J)V"),
     F(testIgnored, "(I)D"),
     F(testCompute, "(I)D"),
-    F(getInternals,"()[J")
+    F(testInfo,"(JLjava/lang/String;)Ljava/lang/String;"),
+    F(getInternals,"()[Ljava/lang/Object;"),
+    F(registerThreadStringCallback, "(Ljava/lang/Object;J)V")
 };
 
 static const JNINativeMethod* execute0 = &profiler_natives[2];

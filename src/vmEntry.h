@@ -58,7 +58,8 @@ enum ASGCT_CallFrameType {
 
     BCI_AWAIT_MARKER        = -40,  // Set at 0 to indicate await stack
     BCI_AWAIT_INSERTION     = -41,  // An async stack should be inserted here
-    BCI_STACK_TAG           = -42
+    BCI_STACK_TAG           = -42,
+    BCI_NONE                = -43
 };
 
 // See hotspot/src/share/vm/prims/forte.cpp
